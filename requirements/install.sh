@@ -81,7 +81,7 @@ NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris" "arx_x5_dual")
 
 #=======================Utility Functions=======================
 
@@ -814,7 +814,7 @@ install_uv() {
                 echo "wget command not found. Please install wget first." >&2
                 exit 1
             fi
-            
+
             # If uv already exists in ~/.local/bin, use it
             if [ -f ~/.local/bin/uv ]; then
                 echo "uv already exists in ~/.local/bin. Using it..."
@@ -1031,7 +1031,7 @@ EOF
     local abi_tag="${py_tag}"                 # we assume cpXY-cpXY ABI, adjust if needed
     local platform_tag="linux_x86_64"
     local wheel_name="apex-0.1+${torch_tag}-${py_tag}-${abi_tag}-${platform_tag}.whl"
-        
+
     uv pip uninstall apex || true
     export NUM_THREADS=$(nproc)
     export NVCC_APPEND_FLAGS=${NVCC_APPEND_FLAGS:-"--threads ${NUM_THREADS}"}
@@ -1352,7 +1352,7 @@ EOF
 )
     cp -r "$VENV_DIR/lib/python${py_major_minor}/site-packages/openpi/models_pytorch/transformers_replace/"* \
         "$VENV_DIR/lib/python${py_major_minor}/site-packages/transformers/"
-    
+
     bash $SCRIPT_DIR/embodied/download_assets.sh --assets openpi
     uv pip uninstall pynvml || true
 }
@@ -1695,6 +1695,10 @@ install_env_only() {
         polaris)
             install_polaris_env
             ;;
+        arx_x5_dual)
+            uv sync --extra arx_x5_dual --active $NO_INSTALL_RLINF_CMD
+            install_arx_x5_dual_env
+            ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for env-only installation." >&2
             exit 1
@@ -1822,7 +1826,7 @@ install_behavior_env() {
     pushd "$behavior_dir" >/dev/null
     UV_LINK_MODE=hardlink ./setup.sh --omnigibson --bddl --joylo --confirm-no-conda --accept-nvidia-eula --use-uv
     # OmniGibson's eval deps need another commit of lerobot, which is in conflict with which rlinf needs.
-    # We actually does not use OmniGibson's lerobot deps, so just install other deps in OmniGibson's eval deps. 
+    # We actually does not use OmniGibson's lerobot deps, so just install other deps in OmniGibson's eval deps.
     uv pip install "dm_tree>=0.1.9" "hydra-core>=1.3.2" "websockets>=15.0.1" "msgpack>=1.1.0" "gspread>=6.2.1" "open3d>=0.19.0" av "numpy<2"
     popd >/dev/null
     uv pip uninstall flash-attn || true
@@ -1863,7 +1867,7 @@ install_polaris_env() {
     uv pip install "flatdict==4.0.1" --no-build-isolation
     uv pip install sympy==1.13.3
     uv pip install -e "$polaris_dir"
-    
+
     python - <<'EOF'
 import isaacsim
 EOF
@@ -1888,7 +1892,7 @@ install_isaaclab_env() {
 install_robocasa_env() {
     local robocasa_dir
     robocasa_dir=$(clone_or_reuse_repo ROBOCASA_PATH "$VENV_DIR/robocasa" https://github.com/RLinf/robocasa.git)
-    
+
     uv pip install -e "$robocasa_dir"
     uv pip install protobuf==6.33.0
     python -m robocasa.scripts.setup_macros
@@ -1973,6 +1977,25 @@ install_xsquare_turtle2_env() {
     uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/xsquare_turtle_basics.git
 }
 
+install_arx_x5_dual_env() {
+    install_lerobot
+
+    # arx5-interface is installed by the arx_x5_dual optional dependency
+    # group. It includes the native controller library in a platform wheel.
+    python -c \
+        "import arx5_interface as arx5; from importlib.metadata import version; assert hasattr(arx5, 'Arx5JointController'); print('ARX X5 SDK import OK:', version('arx5-interface'))"
+
+    echo
+    echo "ARX X5 SDK installation completed."
+    echo
+    echo "Configure and bring up both CAN interfaces according to the"
+    echo "arx5-interface documentation, then test from the RLinf root:"
+    echo
+    echo "  source \"$VENV_DIR/bin/activate\""
+    echo "  python toolkits/realworld_check/test_arx_x5_dual.py \\"
+    echo "    --left-interface can0 --right-interface can1"
+}
+
 install_robotwin_env() {
     # Set TORCH_CUDA_ARCH_LIST based on the CUDA version
     local cuda_mm cuda_major cuda_minor
@@ -2002,7 +2025,7 @@ install_robotwin_env() {
     # ----------- before -----------
     # 667         with open(urdf_file, "r") as f:
     # 668             urdf_string = f.read()
-    # 669 
+    # 669
     # 670         if srdf_file is None:
     # 671             srdf_file = urdf_file[:-4] + "srdf"
     # 672         if os.path.isfile(srdf_file):
@@ -2011,7 +2034,7 @@ install_robotwin_env() {
     # ----------- after  -----------
     # 667         with open(urdf_file, "r", encoding="utf-8") as f:
     # 668             urdf_string = f.read()
-    # 669 
+    # 669
     # 670         if srdf_file is None:
     # 671             srdf_file = urdf_file[:-4] + ".srdf"
     # 672         if os.path.isfile(srdf_file):
@@ -2024,7 +2047,7 @@ install_robotwin_env() {
     # ----------- before -----------
     # 807             if np.linalg.norm(delta_twist) < 1e-4 or collide or not within_joint_limit:
     # 808                 return {"status": "screw plan failed"}
-    # ----------- after  ----------- 
+    # ----------- after  -----------
     # 807             if np.linalg.norm(delta_twist) < 1e-4 or not within_joint_limit:
     # 808                 return {"status": "screw plan failed"}
     PLANNER=$MPLIB_LOCATION/planner.py
@@ -2117,9 +2140,9 @@ install_opensora_world_model() {
     # Clone opensora repository
     local opensora_dir
     opensora_dir=$(clone_or_reuse_repo OPENSORA_PATH "$VENV_DIR/opensora" ${GITHUB_PREFIX}https://github.com/RLinf/opensora.git)
-    
+
     uv pip install -e "$opensora_dir"
-    
+
     # xformers 0.0.29.post2 only has wheels for torch<=2.5, but we pin
     # torch==2.6.0. UV_TORCH_BACKEND=auto rejects mismatched torch-version
     # labels, so unset UV_TORCH_BACKEND entirely for this install so uv
@@ -2147,7 +2170,7 @@ install_roboverse_env() {
     uv pip install git+${GITHUB_PREFIX}https://github.com/facebookresearch/pytorch3d.git@v0.7.9 --no-build-isolation
     uv pip install -e "${roboverse_dir}[sapien3]"
     uv pip install -e "${roboverse_dir}[genesis]"
-    
+
     local pyroki_dir
     pyroki_dir=$(clone_or_reuse_repo PYROKI_PATH "$roboverse_dir/pyroki" https://github.com/chungmin99/pyroki.git)
     uv pip install -e "$pyroki_dir"
@@ -2245,8 +2268,8 @@ main() {
                 dexbotic)
                     install_dexbotic_model
                     ;;
-                lingbotvla)                  
-                    install_lingbot_vla_model 
+                lingbotvla)
+                    install_lingbot_vla_model
                     ;;
                 abot_m0)
                     install_abot_m0_model
