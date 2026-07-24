@@ -539,6 +539,20 @@ def _finite_scalar(name: str, value: Any) -> float:
 
 def _load_sdk(verbose: bool) -> Any:
     print("\n[3] Importing pyarx ...")
+
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+    arx5_prefix = REPO_ROOT / ".venv" / "arx5-conda-env"
+
+    entries = [
+        path
+        for path in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep)
+        if path
+    ]
+    if str(arx5_prefix) not in entries:
+        os.environ["AMENT_PREFIX_PATH"] = os.pathsep.join(
+            [str(arx5_prefix), *entries]
+        )
+
     try:
         import pyarx as arx5
     except Exception as exc:
