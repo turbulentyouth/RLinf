@@ -1,0 +1,159 @@
+# ARX X5 双臂 + OpenPI π0.5 两机推理配置。
+#
+# 节点 0（GPU 服务器）：运行入口脚本、Actor 和 rollout，加载微调后的 π0.5。
+# 节点 1（机器人电脑）：运行 RealWorld Env，读取三路相机和双臂状态，并通过
+#                        arx5-interface 下发 14 维绝对关节位置。
+#
+# 当前文件只验证推理闭环，不启用 PPO、奖励模型、遥操作或自动回零。
+
+defaults:
+  - env/realworld_arx_x5_dual_joint@env.train
+  - env/realworld_arx_x5_dual_joint@env.eval
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    # π0.5 模型和动作推理都放在 GPU 服务器。
+    actor:
+      node_group: inference
+      placement: 0
+    rollout:
+      node_group: inference
+      placement: 0
+    # 三路相机、ARX SDK 和 CAN 控制全部放在机器人电脑。
+    env:
+      node_group: robot
+      placement: 0
+
+  node_groups:
+    - label: inference
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      env_configs:
+        - node_ranks: 1
+          # 必须替换成机器人电脑上执行 env-only 安装后生成的 Python。
+          # 例如：/home/robot/RLinf/.venv/bin/python
+          python_interpreter_path: /ABSOLUTE/PATH/TO/ROBOT/.venv/bin/python
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: arx-x5-dual-openpi
+    experiment_name: "realworld-eval-arx-x5-dual-pi05"
+    logger_backends: ["tensorboard"]
+  # 第一轮只跑一次短评估，确认图像、状态和动作方向无误后再增加。
+  max_epochs: 1
+  max_steps: 300
+  only_eval: true
+  val_check_interval: -1
+
+algorithm:
+  update_epoch: 1
+  group_size: 1
+  eval_rollout_epoch: 1
+  adv_type: gae
+  # 纯推理仍需通过通用配置校验；使用无 critic 的 actor loss 即可。
+  loss_type: actor
+  sampling_params:
+    do_sample: true
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+  length_params:
+    max_new_token: 7
+    max_length: 1024
+    min_length: 1
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: false
+  train:
+    max_episode_steps: 300
+    max_steps_per_rollout_epoch: 300
+    override_cfg:
+      # 三路相机序列号都属于机器人电脑，按物理安装位置填写。
+      head_camera_serial: "HEAD_CAMERA_SERIAL"
+      left_wrist_camera_serial: "LEFT_WRIST_CAMERA_SERIAL"
+      right_wrist_camera_serial: "RIGHT_WRIST_CAMERA_SERIAL"
+      task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
+      max_num_steps: 300
+  eval:
+    max_episode_steps: 300
+    max_steps_per_rollout_epoch: 300
+    override_cfg:
+      head_camera_serial: ${env.train.override_cfg.head_camera_serial}
+      left_wrist_camera_serial: ${env.train.override_cfg.left_wrist_camera_serial}
+      right_wrist_camera_serial: ${env.train.override_cfg.right_wrist_camera_serial}
+      task_description: ${env.train.override_cfg.task_description}
+      max_num_steps: 300
+
+rollout:
+  group_name: "RolloutGroup"
+  backend: "huggingface"
+  recompute_logprobs: false
+  enable_offload: false
+  pipeline_stage_num: 1
+  collect_transitions: false
+  collect_prev_infos: false
+  sync_weight_nccl_max_ctas: 32
+  model:
+    # 必须填写“用方舟数据微调得到”的 π0.5 checkpoint，而不是只填 base 模型。
+    # checkpoint 内还要包含下面 openpi_data.repo_id 对应的 norm_stats.json。
+    model_path: /ABSOLUTE/PATH/TO/ARX_PI05_CHECKPOINT/global_step_N
+    precision: ${actor.model.precision}
+
+critic:
+  use_critic_model: false
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 1
+  global_batch_size: 1
+  seed: 1234
+  enable_offload: false
+  model:
+    model_path: ${rollout.model.model_path}
+    precision: null
+    # π0.5 会预测 50 步动作块，但真机初期只执行第 1 步，随后立即重新读取
+    # 三路图像和状态再推理，避免一次开环执行过长的动作序列。
+    num_action_chunks: 1
+    # [左 q1..q6, 左夹爪, 右 q1..q6, 右夹爪]
+    action_dim: 14
+    add_value_head: false
+    openpi:
+      config_name: "pi05_arx_x5_dual"
+      train_expert_only: false
+      detach_critic_input: true
+      action_chunk: ${actor.model.num_action_chunks}
+    openpi_data:
+      # 必须和 SFT 时使用的数据集 repo_id 完全一致，用于定位归一化统计。
+      repo_id: ARX_SFT_DATASET_REPO_ID
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: false
+    gradient_checkpointing: false
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
