@@ -9,6 +9,7 @@ ENV_NAME=""
 VENV_DIR=".venv"
 PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
+ARX5_SDK_COMMIT="a1188874d5a50aa61dec4f0b8fec6af77638b390"
 TORCH_VERSION=""
 SGLANG_VERSION=""
 TRANSFORMERS_VERSION=""
@@ -1980,20 +1981,172 @@ install_xsquare_turtle2_env() {
 install_arx_x5_dual_env() {
     install_lerobot
 
-    # arx5-interface is installed by the arx_x5_dual optional dependency
-    # group. It includes the native controller library in a platform wheel.
+    # ---- 0. 检查/准备 conda ----
+    local conda_exe=""
+    if command -v conda &>/dev/null; then
+        conda_exe="conda"
+    elif command -v mamba &>/dev/null; then
+        conda_exe="mamba"
+    else
+        # 如果没有 conda，在 venv 旁装一个 miniforge（轻量，不影响系统）
+        local miniforge_dir="$VENV_DIR/miniforge"
+        if [ ! -d "$miniforge_dir" ]; then
+            local miniforge_sh
+            case "$(uname -m)" in
+                x86_64)  miniforge_sh="Miniforge3-Linux-x86_64.sh" ;;
+                aarch64) miniforge_sh="Miniforge3-Linux-aarch64.sh" ;;
+                *) echo "Unsupported arch for ARX5 SDK: $(uname -m)" >&2; exit 1 ;;
+            esac
+            echo "Downloading Miniforge for C++ build deps..."
+            wget -q "https://github.com/conda-forge/miniforge/releases/latest/download/${miniforge_sh}" \
+                -O "$VENV_DIR/${miniforge_sh}"
+            bash "$VENV_DIR/${miniforge_sh}" -b -p "$miniforge_dir"
+            rm "$VENV_DIR/${miniforge_sh}"
+            "$miniforge_dir/bin/conda" init --no-user bash >/dev/null 2>&1 || true
+        fi
+        conda_exe="$miniforge_dir/bin/conda"
+    fi
+
+    # ---- 1. 用 conda 安装 C++ 编译依赖（到 SDK 目录下的 conda env） ----
+    local arx5_conda_env="$VENV_DIR/arx5-conda-env"
+    if [ ! -x "$arx5_conda_env/bin/python" ] || \
+    [ ! -f "$arx5_conda_env/share/kdl_parser/cmake/kdl_parserConfig.cmake" ]; then
+
+    echo "Creating conda environment for ARX5 C++ build deps..."
+
+    rm -rf "$arx5_conda_env"
+
+    "$conda_exe" create -y -p "$arx5_conda_env" \
+        --override-channels \
+        -c https://conda.anaconda.org/robostack-staging \
+        -c https://conda.anaconda.org/conda-forge \
+        --strict-channel-priority \
+        python="$PYTHON_VERSION" \
+        pip \
+        pybind11 \
+        spdlog \
+        soem=1.4.0 \
+        orocos-kdl \
+        ros-humble-kdl-parser \
+        ros-humble-ament-cmake \
+        eigen=3.4.0 \
+        cmake \
+        make \
+        compilers \
+        urdfdom_headers \
+        || { echo "conda env creation failed" >&2; exit 1; }
+
+    "$arx5_conda_env/bin/python" -m pip install atomics \
+        || { echo "atomics installation failed" >&2; exit 1; }
+    fi
+    local conda_prefix="$arx5_conda_env"
+    export CONDA_PREFIX="$conda_prefix"
+
+    # ---- 2. Clone ARX5 SDK ----
+    local sdk_dir
+    sdk_dir=$(clone_or_reuse_repo ARX5_SDK_PATH \
+        "$VENV_DIR/arx5-sdk" \
+        https://github.com/turbulentyouth/ARX5_SDK.git)
+    if ! git -C "$sdk_dir" cat-file -e "$ARX5_SDK_COMMIT^{commit}" 2>/dev/null; then
+        git -C "$sdk_dir" fetch origin "$ARX5_SDK_COMMIT"
+    fi
+    if ! git -C "$sdk_dir" diff --quiet || \
+       ! git -C "$sdk_dir" diff --cached --quiet; then
+        echo "ARX5 SDK checkout has local changes: $sdk_dir" >&2
+        echo "Commit or stash them before installing." >&2
+        exit 1
+    fi
+    git -C "$sdk_dir" checkout --detach "$ARX5_SDK_COMMIT"
+
+    # ---- 3. CMake 编译 Python bindings ----
+    echo "Building ARX5 SDK Python bindings..."
+
+    arx5_conda_env="$(realpath "$arx5_conda_env")"
+    local arx5_sdk_dir="$sdk_dir"
+    local arx5_build_dir="$arx5_sdk_dir/build"
+    local runtime_python
+    runtime_python="$(realpath "$VENV_DIR/bin/python")"
+
+    echo "ARX5 conda env: $arx5_conda_env"
+    echo "ARX5 SDK dir:   $arx5_sdk_dir"
+    echo "ARX5 build dir: $arx5_build_dir"
+
+    local ament_site_packages
+    ament_site_packages="$(
+        "$arx5_conda_env/bin/python" -c \
+            'import site; print(site.getsitepackages()[0])'
+    )"
+
+    local pybind11_dir
+    pybind11_dir="$(
+        "$arx5_conda_env/bin/python" -m pybind11 --cmakedir
+    )"
+
+    echo "Runtime Python:          $runtime_python"
+    echo "Ament site-packages:     $ament_site_packages"
+    echo "pybind11 CMake directory: $pybind11_dir"
+
+    env \
+        CONDA_PREFIX="$arx5_conda_env" \
+        PATH="$arx5_conda_env/bin:$PATH" \
+        PYTHONPATH="$ament_site_packages${PYTHONPATH:+:$PYTHONPATH}" \
+        "$arx5_conda_env/bin/cmake" \
+            -S "$arx5_sdk_dir" \
+            -B "$arx5_build_dir" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$arx5_conda_env" \
+            -DARX5_RUNTIME_PYTHON:FILEPATH="$runtime_python" \
+            -DPython3_EXECUTABLE:FILEPATH="$runtime_python" \
+            -Dpybind11_DIR:PATH="$pybind11_dir" \
+            -DSPDLOG_FMT_EXTERNAL=OFF \
+            -DCMAKE_BUILD_RPATH="$arx5_conda_env/lib" \
+            -DCMAKE_INSTALL_RPATH="$arx5_conda_env/lib" \
+            -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
+            || {
+                echo "ARX5 CMake configuration failed" >&2
+                exit 1
+            }
+
+    env \
+        CONDA_PREFIX="$arx5_conda_env" \
+        PATH="$arx5_conda_env/bin:$PATH" \
+        PYTHONPATH="$ament_site_packages${PYTHONPATH:+:$PYTHONPATH}" \
+        "$arx5_conda_env/bin/cmake" \
+            --build "$arx5_build_dir" \
+            --target _arx5_interface \
+            -j"$(nproc)" \
+            || {
+                echo "ARX5 Python binding build failed" >&2
+                exit 1
+            }
+
+    # ---- 4. 安装 pyarx 包到 uv venv ----
+    echo "Installing pyarx into uv venv..."
+    uv pip install -e "$sdk_dir"
+
+    # ---- 5. 设置运行时 LD_LIBRARY_PATH ----
+    local activate_script="$VENV_DIR/bin/activate"
+    if ! grep -q 'ARX5_CONDA_LIB' "$activate_script" 2>/dev/null; then
+        echo "export ARX5_CONDA_LIB=\"$conda_prefix/lib\"" >> "$activate_script"
+        echo 'export LD_LIBRARY_PATH="$ARX5_CONDA_LIB:$LD_LIBRARY_PATH"' >> "$activate_script"
+    fi
+
+    # ---- 6. 验证 ----
     python -c \
-        "import arx5_interface as arx5; from importlib.metadata import version; assert hasattr(arx5, 'Arx5JointController'); print('ARX X5 SDK import OK:', version('arx5-interface'))"
+        "import pyarx as arx5; \
+         assert hasattr(arx5, 'Arx5JointController'); \
+         assert hasattr(arx5, 'RobotConfigFactory'); \
+         assert hasattr(arx5, 'ControllerConfigFactory'); \
+         print('ARX5 SDK import OK')"
 
     echo
-    echo "ARX X5 SDK installation completed."
+    echo "ARX5 SDK installation completed."
     echo
-    echo "Configure and bring up both CAN interfaces according to the"
-    echo "arx5-interface documentation, then test from the RLinf root:"
+    echo "Configure and bring up both CAN interfaces, then test from the RLinf root:"
     echo
     echo "  source \"$VENV_DIR/bin/activate\""
     echo "  python toolkits/realworld_check/test_arx_x5_dual.py \\"
-    echo "    --left-interface can0 --right-interface can1"
+    echo "    --left-interface can1 --right-interface can3"
 }
 
 install_robotwin_env() {
