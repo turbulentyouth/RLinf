@@ -150,11 +150,6 @@ xsquare_turtle2 = [
     # (PyPI forbids direct-URL deps in published packages).
 ]
 arx_x5_dual = [
-    # 0.1.3 fixes X5 (2025) reversed-gripper over-current protection, but its
-    # 0.1.3 PyPI release only publishes x86_64 wheels. Keep ARM64 on the
-    # newest release for which an aarch64 wheel is available.
-    "arx5-interface==0.1.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "arx5-interface==0.1.2; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "pyyaml",
     "numpy==1.26.4",
     "gymnasium==0.29.1",
