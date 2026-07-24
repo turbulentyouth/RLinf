@@ -1,0 +1,82 @@
+# ARX X5 双臂真机环境：三路 RGB 图像 + 14 维绝对关节位置。
+#
+# 数据流：
+#   头部相机、左右腕相机、当前双臂状态
+#       -> RealWorldEnv observation
+#       -> OpenPI pi05_arx_x5_dual 输入转换
+#       -> π0.5 输出 14 维绝对动作
+#       -> ArxX5DualEnv.step(action)
+#       -> arx5-interface set_joint_cmd
+
+env_type: realworld
+
+# 真机只能有一个环境实例；同时创建两个实例会争用同一组 CAN 和相机设备。
+total_num_envs: 1
+group_size: 1
+auto_reset: false
+ignore_terminations: false
+reward_mode: raw
+wrap_obs_mode: simple
+seed: 0
+use_fixed_reset_state_ids: false
+max_steps_per_rollout_epoch: 300
+max_episode_steps: 300
+
+# 头部相机是 π0.5 的主视角。RealWorldEnv 会把它映射为 main_images；
+# 其余两路按名称排序后堆叠为 extra_view_images，顺序是左腕、右腕。
+main_image_key: base_0_rgb
+
+# 当前版本不叠加遥操作和自动奖励 Wrapper，只验证 π0.5 与 ARX 的闭环。
+use_spacemouse: false
+use_gello: false
+use_gello_joint: false
+use_pico: false
+use_relative_frame: false
+no_gripper: false
+
+video_cfg:
+  save_video: false
+  info_on_video: true
+  video_base_dir: ${runner.logger.log_path}/video/eval
+
+init_params:
+  id: "ArxX5DualEnv-v1"
+  num_envs: null
+
+override_cfg:
+  # 必须确认型号。ARX 官方说明：使用错误型号可能引发危险运动。
+  robot_model: "X5"
+  left_interface: "can0"
+  right_interface: "can1"
+
+  # 替换为机器人电脑实际连接的三路相机序列号。
+  head_camera_serial: "HEAD_CAMERA_SERIAL"
+  left_wrist_camera_serial: "LEFT_WRIST_CAMERA_SERIAL"
+  right_wrist_camera_serial: "RIGHT_WRIST_CAMERA_SERIAL"
+  camera_type: "realsense"
+  image_height: 224
+  image_width: 224
+  camera_frame_timeout: 0.5
+
+  # ARX SDK 后台通信保持 500 Hz；RLinf/π0.5 每秒更新 10 次绝对目标。
+  controller_dt: 0.002
+  # 给 SDK 后台线程留出时间接收第一批真实状态，避免把默认零值当作当前姿态。
+  controller_warmup_time: 0.5
+  step_frequency: 10.0
+
+  # SDK 在 0.1 秒内插值到新目标；同时将官方速度上限缩小到 20%。
+  command_preview_time: 0.1
+  joint_velocity_limit_scale: 0.2
+
+  # 从硬限位两端各缩进 5%，并限制每次 Env step 最多变化 0.1 rad。
+  # π0.5 输出和最终 SDK 命令仍然都是“绝对关节位置”，不是 delta 动作。
+  joint_limit_margin_ratio: 0.05
+  max_joint_delta_per_step: 0.1
+
+  # 两个夹爪维度同样使用绝对值，单位是 ARX SDK 的物理夹爪宽度：
+  # 0 表示闭合，最大值来自 robot_config.gripper_width（X5 通常为 0.088）。
+  # SFT 数据中的夹爪 state/action 必须使用同一单位，不能混用 0~1 归一化值。
+
+  max_num_steps: 300
+  task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
+  is_dummy: false

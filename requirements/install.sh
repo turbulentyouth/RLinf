@@ -1327,6 +1327,16 @@ install_openpi_model() {
             uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             ;;
+        arx_x5_dual)
+            create_and_sync_venv
+            install_common_embodied_deps
+            # embodied 和 arx_x5_dual extras 在 pyproject.toml 中声明为冲突，
+            # 因此按顺序安装，并用 --inexact 保留前面已经装好的公共依赖。
+            uv sync --extra arx_x5_dual --inexact --active $NO_INSTALL_RLINF_CMD
+            install_arx_x5_dual_env
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_flash_attn
+            ;;
         polaris)
             create_and_sync_venv
             install_common_embodied_deps
@@ -1992,7 +2002,7 @@ install_arx_x5_dual_env() {
     echo "arx5-interface documentation, then test from the RLinf root:"
     echo
     echo "  source \"$VENV_DIR/bin/activate\""
-    echo "  python toolkits/realworld_check/test_arx_x5_dual.py \\"
+    echo "  python toolkits/realworld_check/test_arx_x5_dual_read.py \\"
     echo "    --left-interface can0 --right-interface can1"
 }
 

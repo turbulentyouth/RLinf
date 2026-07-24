@@ -28,6 +28,9 @@ from openpi.training.config import (
     TrainConfig,
 )
 
+from rlinf.models.embodiment.openpi.dataconfig.arx_x5_dual_dataconfig import (
+    ArxX5DualDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.behavior_dataconfig import (
     LeRobotBehaviorDataConfig,
 )
@@ -491,6 +494,36 @@ _CONFIGS = [
             extra_delta_transform=True,
         ),
         pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
+    TrainConfig(
+        # 该名字是 YAML 中 actor.model.openpi.config_name 的取值。
+        name="pi05_arx_x5_dual",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            # π0.5 base 和现有 BiARX5 SFT 配置使用 50 步训练动作块。真机初期
+            # 可以只执行动作块的第 1 步，再读取新观测重新推理。
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=ArxX5DualDataConfig(
+            repo_id="arx_x5_dual",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_arx_x5_dual/assets"
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        seed=0,
+        batch_size=16,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_workers=8,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=250,
     ),
     TrainConfig(
         name="pi0_droid_polaris",
