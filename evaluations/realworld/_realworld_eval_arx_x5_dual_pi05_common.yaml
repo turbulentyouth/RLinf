@@ -1,0 +1,92 @@
+# ARX X5 双臂 + OpenPI pi0.5 两机评估共享配置。
+# 该文件由正式运行和两种 dry-run 主配置复用，不应直接启动。
+
+defaults:
+  - env/realworld_arx_x5_dual_joint@env.eval
+  - model/pi0_5@rollout.model
+  - _self_
+  - override hydra/job_logging: stdout
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    rollout:
+      node_group: inference
+      placement: 0
+    env:
+      node_group: robot
+      placement: 0
+  node_groups:
+    - label: inference
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      env_configs:
+        - node_ranks: 1
+          python_interpreter_path: ${oc.env:ROBOT_RLINF_PYTHON}
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: "../results"
+    project_name: arx-x5-dual-openpi
+    experiment_name: "realworld-eval-arx-x5-dual-pi05"
+    logger_backends: ["tensorboard"]
+  max_epochs: 1
+  max_steps: 1
+  only_eval: true
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: false
+  eval:
+    rollout_epoch: 1
+    total_num_envs: 1
+    group_size: 1
+    auto_reset: false
+    ignore_terminations: false
+    is_eval: true
+    max_episode_steps: 300
+    max_steps_per_rollout_epoch: 300
+    override_cfg:
+      dry_run: false
+      is_dummy: false
+      left_interface: ${oc.env:ARX_LEFT_INTERFACE,can1}
+      right_interface: ${oc.env:ARX_RIGHT_INTERFACE,can3}
+      head_camera_serial: ${oc.env:ARX_HEAD_CAMERA_SERIAL}
+      left_wrist_camera_serial: ${oc.env:ARX_LEFT_CAMERA_SERIAL}
+      right_wrist_camera_serial: ${oc.env:ARX_RIGHT_CAMERA_SERIAL}
+      task_description: ${oc.env:ARX_TASK_DESCRIPTION}
+      max_num_steps: 300
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: false
+  enable_offload: false
+  pipeline_stage_num: 1
+  collect_transitions: false
+  collect_prev_infos: false
+  model:
+    model_path: ${oc.env:ARX_PI05_CHECKPOINT}
+    precision: null
+    num_action_chunks: 1
+    action_dim: 14
+    num_steps: 5
+    add_value_head: false
+    openpi:
+      config_name: "pi05_arx_x5_dual"
+      num_images_in_input: 3
+      train_expert_only: false
+      detach_critic_input: true
+      action_chunk: ${rollout.model.num_action_chunks}
+      action_env_dim: ${rollout.model.action_dim}
+      num_steps: ${rollout.model.num_steps}
+      add_value_head: ${rollout.model.add_value_head}
+    openpi_data:
+      repo_id: ${oc.env:ARX_SFT_REPO_ID}
+      norm_stats_path: ${oc.env:ARX_NORM_STATS_PATH}

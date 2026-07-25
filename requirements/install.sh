@@ -11,7 +11,7 @@ PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
 ARX5_SDK_COMMIT="a1188874d5a50aa61dec4f0b8fec6af77638b390"
 OPENPI_REPO_URL="${OPENPI_REPO_URL:-https://github.com/turbulentyouth/xense-openpi}"
-OPENPI_COMMIT="${OPENPI_COMMIT:-c3defef9ef647e8c7bc93fc73e9dae11b9c82e8a}"
+OPENPI_COMMIT="${OPENPI_COMMIT:-37d49f0b2f3d78e64cbcc7531853dcd6f7f1fcee}"
 OPENPI_PYTHON_VERSION="${OPENPI_PYTHON_VERSION:-3.12}"
 TORCH_VERSION=""
 SGLANG_VERSION=""
@@ -54,10 +54,13 @@ DISABLE_FLASH_ATTN=0
 # User-level opt-out for apex, set by --no-apex. Wins over the platform default.
 DISABLE_APEX=0
 # Whether apply_torch_override should rewrite the pyproject.toml `torchcodec`
-# pin from ==0.2 to >=0.5. The ==0.2 line in override-dependencies has wheels
-# only for x86_64 + torch 2.5/2.6, so it breaks on AMD (torch 2.8 from rocm
-# index) and on Ascend (aarch64). Set per-platform by configure_<platform>.
+# pin from ==0.2 to >=0.5. The ==0.2 line follows Torch 2.5/2.6; newer
+# Torch releases require a newer TorchCodec compatibility band. Set per-platform
+# by configure_<platform>, or derived from the effective Torch version.
 PLATFORM_RELAX_TORCHCODEC=0
+# Optional exact TorchCodec pin for a platform/model target. This is applied
+# during the temporary pyproject rewrite so every uv sync sees the same ABI.
+PLATFORM_TORCHCODEC_PIN=""
 # Extra entries (full PEP 508 specifiers) inserted into the pyproject.toml
 # `override-dependencies` array by apply_torch_override. Use this for
 # platform-specific transitive pins that aren't in the original file
@@ -403,6 +406,21 @@ configure_nvidia() {
     PLATFORM_TORCH_STR=""
     PLATFORM_TORCH_INDEX=""
     PLATFORM_TORCH_PACKAGES=()
+    if [ "$TARGET" = "embodied" ] && [ "$MODEL" = "openpi" ] && [ "$ENV_NAME" = "arx_x5_dual" ]; then
+        # RTX 50-series (Blackwell, sm_120) requires a CUDA 12.8-enabled
+        # PyTorch wheel. Keep this target-specific because other RLinf model
+        # stacks still pin extensions against older Torch ABIs.
+        if [ -z "$TORCH_VERSION" ]; then
+            TORCH_VERSION="2.7.1"
+        elif [ "$TORCH_VERSION" != "2.7.1" ]; then
+            echo "OpenPI + arx_x5_dual requires --torch 2.7.1 (got ${TORCH_VERSION})." >&2
+            exit 1
+        fi
+        PLATFORM_TORCH_STR="+cu128"
+        PLATFORM_TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+        PLATFORM_TORCH_PACKAGES=("torch" "torchvision" "torchaudio")
+        PLATFORM_TORCHCODEC_PIN="0.5"
+    fi
     PLATFORM_VENV_EXPORTS=(
         "export NVIDIA_DRIVER_CAPABILITIES=all"
         "export VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json"
@@ -411,8 +429,11 @@ configure_nvidia() {
     PLATFORM_FLASH_ATTN_INSTALL=1
     PLATFORM_FLASH_ATTN_PREBUILT=1
     PLATFORM_RELAX_TORCHCODEC=0
+    PLATFORM_TORCHCODEC_PIN="${PLATFORM_TORCHCODEC_PIN:-}"
     PLATFORM_EXTRA_OVERRIDES=()
-    if [ -z "${UV_TORCH_BACKEND:-}" ]; then
+    if [ "$MODEL" = "openpi" ] && [ "$ENV_NAME" = "arx_x5_dual" ]; then
+        export UV_TORCH_BACKEND="cu128"
+    elif [ -z "${UV_TORCH_BACKEND:-}" ]; then
         export UV_TORCH_BACKEND="$DEFAULT_BACKEND_NVIDIA"
     fi
 }
@@ -660,12 +681,14 @@ apply_torch_override() {
     # non-empty (append a PEP 440 local segment so uv picks the platform-specific
     # wheel rather than PyPI's CUDA build), PLATFORM_TORCH_INDEX is non-empty
     # (route torch* through a dedicated index for `uv sync`, which doesn't honor
-    # UV_TORCH_BACKEND), PLATFORM_RELAX_TORCHCODEC is set (rewrite the
-    # torchcodec pin for non-x86_64 / non-CUDA torch combos), or
+    # UV_TORCH_BACKEND), PLATFORM_TORCHCODEC_PIN is set (exact target ABI),
+    # PLATFORM_RELAX_TORCHCODEC is set (rewrite the torchcodec compatibility
+    # band for non-default Torch combos), or
     # PLATFORM_EXTRA_OVERRIDES has entries (insert extra override pins).
 
-    # torchcodec==0.2.x only has wheels for torch<=2.6. Relax the pin whenever
-    # the effective torch version exceeds 2.6, regardless of platform.
+    # The default torchcodec==0.2.x follows Torch 2.5/2.6. Relax the pin
+    # whenever the effective Torch version exceeds 2.6; target constraints can
+    # then select an exact compatible release (0.5 for Torch 2.7).
     local _eff_torch="${TORCH_VERSION}"
     if [ -z "$_eff_torch" ] && [ -f "$PYPROJECT_FILE" ]; then
         _eff_torch=$(sed -nE 's/.*"torch==([^"+]+).*".*/\1/p' "$PYPROJECT_FILE" | head -1)
@@ -683,6 +706,7 @@ apply_torch_override() {
         needs_torch_rewrite=1
     fi
     if [ "$needs_torch_rewrite" -eq 0 ] \
+        && [ -z "$PLATFORM_TORCHCODEC_PIN" ] \
         && [ "$PLATFORM_RELAX_TORCHCODEC" -ne 1 ] \
         && [ ${#PLATFORM_EXTRA_OVERRIDES[@]} -eq 0 ]; then
         return 0
@@ -697,14 +721,16 @@ apply_torch_override() {
     cp "$PYPROJECT_FILE" "$PYPROJECT_BACKUP"
     trap 'restore_pyproject' EXIT INT TERM HUP
 
-    if [ "$PLATFORM_RELAX_TORCHCODEC" -eq 1 ]; then
-        # The pyproject.toml `torchcodec==0.2.x` override only has wheels for
-        # x86_64 + torch ~2.5/2.6. It breaks on AMD (our torch override pins
-        # 2.8 from the rocm index) and on Ascend (typically aarch64, where
-        # 0.2.x has no wheels). Relaxing to >=0.5 lets uv pick a wheel for
-        # the resolved environment; transitive pins like lerobot==0.1.0's
-        # ==0.2 are superseded by override-dependencies.
-        sed -i -E 's/"torchcodec==0\.2(\.[0-9]+)?"/"torchcodec>=0.5"/' "$PYPROJECT_FILE"
+    if [ -n "$PLATFORM_TORCHCODEC_PIN" ]; then
+        sed -i -E \
+            "s/\"torchcodec==0\\.[0-9]+(\\.[0-9]+)?\"/\"torchcodec==${PLATFORM_TORCHCODEC_PIN}\"/" \
+            "$PYPROJECT_FILE"
+        echo "[install.sh] Pinned torchcodec==${PLATFORM_TORCHCODEC_PIN} for the selected target"
+    elif [ "$PLATFORM_RELAX_TORCHCODEC" -eq 1 ]; then
+        # Newer Torch/platform combinations need a newer compatible wheel, so
+        # relax only during the temporary platform-specific resolution.
+        # Transitive pins are still superseded by override-dependencies.
+        sed -i -E 's/"torchcodec==0\.[0-9]+(\.[0-9]+)?"/"torchcodec>=0.5"/' "$PYPROJECT_FILE"
         echo "[install.sh] Relaxed torchcodec override to >=0.5 for ${PLATFORM} compatibility"
     fi
 
@@ -893,8 +919,9 @@ EOF
 }
 
 install_flash_attn() {
-    # Base release info – adjust when bumping flash-attn
-    local flash_ver="2.7.4.post1"
+    # v2.8.3 publishes CPython 3.12 wheels for CUDA 12 / Torch 2.7,
+    # avoiding a source build on hosts that do not have nvcc installed.
+    local flash_ver="2.8.3"
 
     if [ "$DISABLE_FLASH_ATTN" -eq 1 ]; then
         echo "[install.sh] --no-flash-attn was specified; skipping flash-attn install."
@@ -905,29 +932,7 @@ install_flash_attn() {
         return 0
     fi
 
-    local torch_ge_28
-    if torch_ge_28=$(python - <<'EOF' 2>/dev/null
-import re
-import torch
-
-version = torch.__version__.split("+", 1)[0]
-match = re.match(r"^(\d+)\.(\d+)", version)
-if match is None:
-    print("0")
-else:
-    major, minor = (int(part) for part in match.groups())
-    print("1" if (major, minor) >= (2, 8) else "0")
-EOF
-    ); then
-        if [ "$torch_ge_28" = "1" ]; then
-            flash_ver="2.8.3"
-        fi
-    fi
-
     local prebuilt_flash_versions=("$flash_ver")
-    if [ "$flash_ver" != "2.8.3" ]; then
-        prebuilt_flash_versions+=("2.8.3")
-    fi
 
     if [ "$PLATFORM_FLASH_ATTN_PREBUILT" -ne 1 ]; then
         echo "[install.sh] Building flash-attn==${flash_ver} from source on platform=${PLATFORM}..."
@@ -1092,17 +1097,23 @@ clone_or_reuse_repo() {
 }
 
 #=======================EMBODIED INSTALLERS=======================
-install_common_embodied_deps() {
+install_common_embodied_runtime_deps() {
     # Install compiler toolchains and Python headers before resolving packages
     # such as evdev that may need to build a C extension from source.
     if [ "$NO_ROOT" -eq 0 ]; then
         bash $SCRIPT_DIR/sys_deps.sh "$PLATFORM"
     fi
     uv sync --extra embodied --active $NO_INSTALL_RLINF_CMD
-    uv pip install -r $SCRIPT_DIR/embodied/envs/common.txt
     if [ ${#PLATFORM_VENV_EXPORTS[@]} -gt 0 ]; then
         printf '%s\n' "${PLATFORM_VENV_EXPORTS[@]}" >> "$VENV_DIR/bin/activate"
     fi
+}
+
+install_common_embodied_deps() {
+    install_common_embodied_runtime_deps
+    # Simulator stacks share these packages. Real-robot inference targets must
+    # not install them because robosuite/sapien require the GUI OpenCV package.
+    uv pip install -r $SCRIPT_DIR/embodied/envs/common.txt
 }
 
 is_aarch64_platform() {
@@ -1344,7 +1355,11 @@ install_openpi_model() {
             ;;
         arx_x5_dual)
             create_and_sync_venv
-            install_common_embodied_deps
+            install_common_embodied_runtime_deps
+            # Remove simulator roots left by an older reused environment. They
+            # are unused by ARX inference and require the conflicting GUI
+            # OpenCV distribution in their package metadata.
+            uv pip uninstall robosuite sapien bddl || true
             # Keep the headless OpenCV provider required by LeRobot. Resolve
             # the final NumPy ABI before installing xense-openpi or compiling
             # the ARX5 extension.
@@ -1733,6 +1748,9 @@ from importlib import metadata
 import cv2
 import numpy as np
 import pyarx as arx5
+import torch
+import torchaudio
+import torchvision
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
@@ -1741,7 +1759,17 @@ assert np.__version__ == "1.26.4", np.__version__
 assert cv2.__version__ == "4.11.0", cv2.__version__
 assert metadata.version("lerobot") == "0.1.0", metadata.version("lerobot")
 assert metadata.version("sympy") == "1.13.1", metadata.version("sympy")
-assert metadata.version("torchcodec") == "0.2.1", metadata.version("torchcodec")
+assert metadata.version("torch") == "2.7.1+cu128", metadata.version("torch")
+assert metadata.version("torchvision") == "0.22.1+cu128", metadata.version("torchvision")
+assert metadata.version("torchaudio") == "2.7.1+cu128", metadata.version("torchaudio")
+assert metadata.version("torchcodec") == "0.5", metadata.version("torchcodec")
+assert torchvision.__version__ == "0.22.1+cu128", torchvision.__version__
+assert torchaudio.__version__ == "2.7.1+cu128", torchaudio.__version__
+if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (12, 0):
+    assert tuple(int(part) for part in torch.version.cuda.split(".")) >= (12, 8), torch.version.cuda
+    assert "sm_120" in torch.cuda.get_arch_list(), torch.cuda.get_arch_list()
+    result = torch.ones(8, device="cuda") @ torch.ones(8, device="cuda")
+    assert result.item() == 8.0, result
 assert hasattr(arx5, "Arx5JointController")
 assert hasattr(arx5, "RobotConfigFactory")
 assert hasattr(arx5, "ControllerConfigFactory")

@@ -210,6 +210,44 @@ class _FakeCamera:
         self.closed = True
 
 
+class _FakeEnvController:
+    """模拟 Env 直接使用的控制器，用于验证 hardware dry-run。"""
+
+    instances = []
+
+    def __init__(self, model, interface_name, **kwargs):
+        del kwargs
+        assert model == "X5"
+        self.interface_name = interface_name
+        self.joint_position_low = np.full(6, -2.0, dtype=np.float64)
+        self.joint_position_high = np.full(6, 2.0, dtype=np.float64)
+        self.gripper_position_low = 0.0
+        self.gripper_position_high = 0.088
+        self.position_control_calls = 0
+        self.sent_actions = []
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def enable_position_control(self, **kwargs):
+        del kwargs
+        self.position_control_calls += 1
+
+    def read_state(self):
+        return SimpleNamespace(
+            joint_position=np.zeros(6, dtype=np.float64),
+            gripper_position=0.0,
+        )
+
+    def send_absolute_joint_position(self, joint_position, gripper_position):
+        self.sent_actions.append((joint_position.copy(), gripper_position))
+
+    def set_to_damping(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
 class _FakeGain:
     """模拟 ARX SDK 的 Gain，支持 kp()/kd() 方法。"""
 
@@ -320,9 +358,7 @@ def test_dummy_env_returns_three_images_and_executes_14d_action(monkeypatch):
         [0.1] * 6 + [0.04] + [0.1] * 6 + [0.05],
         dtype=np.float32,
     )
-    np.testing.assert_allclose(
-        observation["state"]["joint_position"], expected_state
-    )
+    np.testing.assert_allclose(observation["state"]["joint_position"], expected_state)
     np.testing.assert_allclose(info["requested_action"], requested)
     np.testing.assert_allclose(info["executed_action"], expected_state)
     assert reward == 0.0
@@ -358,12 +394,71 @@ def test_camera_frames_are_mapped_to_three_rgb_views(monkeypatch):
         "right_wrist_0_rgb",
     }
     np.testing.assert_array_equal(frames["base_0_rgb"][0, 0], [30, 20, 10])
-    np.testing.assert_array_equal(
-        frames["left_wrist_0_rgb"][0, 0], [60, 50, 40]
-    )
-    np.testing.assert_array_equal(
-        frames["right_wrist_0_rgb"][0, 0], [90, 80, 70]
-    )
+    np.testing.assert_array_equal(frames["left_wrist_0_rgb"][0, 0], [60, 50, 40])
+    np.testing.assert_array_equal(frames["right_wrist_0_rgb"][0, 0], [90, 80, 70])
     assert all(frame.shape == (4, 4, 3) for frame in frames.values())
 
     env.close()
+
+
+def test_hardware_dry_run_reads_devices_without_sending_actions(monkeypatch):
+    """确认连接硬件的 dry-run 不启用位置控制且不发送候选动作。"""
+
+    _, ArxX5DualEnv = _import_arx_classes(monkeypatch)
+    from rlinf.envs.realworld.arx_x5_dual import arx_x5_dual_env as env_module
+
+    _FakeEnvController.instances.clear()
+    monkeypatch.setattr(env_module, "ArxX5JointController", _FakeEnvController)
+
+    def _open_fake_cameras(instance):
+        instance._cameras = [
+            _FakeCamera("base_0_rgb", (10, 20, 30)),
+            _FakeCamera("left_wrist_0_rgb", (40, 50, 60)),
+            _FakeCamera("right_wrist_0_rgb", (70, 80, 90)),
+        ]
+
+    monkeypatch.setattr(ArxX5DualEnv, "_open_cameras", _open_fake_cameras)
+    env = ArxX5DualEnv(
+        override_cfg={
+            "dry_run": True,
+            "is_dummy": False,
+            "skip_interface_check": True,
+            "head_camera_serial": "head",
+            "left_wrist_camera_serial": "left",
+            "right_wrist_camera_serial": "right",
+            "controller_warmup_time": 0.0,
+            "step_frequency": 1_000_000.0,
+            "image_height": 4,
+            "image_width": 4,
+        }
+    )
+
+    assert len(_FakeEnvController.instances) == 2
+    assert all(
+        controller.position_control_calls == 0
+        for controller in _FakeEnvController.instances
+    )
+
+    requested = np.array([0.5] * 6 + [0.04] + [0.5] * 6 + [0.05])
+    observation, _, _, _, info = env.step(requested)
+
+    assert all(
+        not controller.sent_actions for controller in _FakeEnvController.instances
+    )
+    assert info["action_sent"] is False
+    assert info["dry_run_mode"] == "hardware"
+    np.testing.assert_array_equal(
+        observation["state"]["joint_position"], np.zeros(14, dtype=np.float32)
+    )
+    assert env.observation_space.contains(observation)
+
+    env.close()
+    assert all(controller.closed for controller in _FakeEnvController.instances)
+
+
+def test_dry_run_and_dummy_modes_are_mutually_exclusive(monkeypatch):
+    """确认两种 dry-run 语义不能被同时启用。"""
+
+    _, ArxX5DualEnv = _import_arx_classes(monkeypatch)
+    with pytest.raises(ValueError, match="不能同时启用"):
+        ArxX5DualEnv(override_cfg={"dry_run": True, "is_dummy": True})

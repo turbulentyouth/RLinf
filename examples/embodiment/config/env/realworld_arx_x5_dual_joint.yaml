@@ -84,4 +84,7 @@ override_cfg:
   max_num_steps: 300
   task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
   skip_interface_check: false
+  # hardware dry-run 会连接 CAN 和相机、读取真实观测，但不启用位置控制，也不发送动作。
+  dry_run: false
+  # distributed dry-run 使用 is_dummy=true，不要求连接机械臂、CAN 或相机。
   is_dummy: false

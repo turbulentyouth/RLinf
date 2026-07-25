@@ -39,9 +39,7 @@ from .arx_x5_dual_robot_state import ArxX5ArmState
 _X5_JOINT_POSITION_LOW = np.array(
     [-3.14, -0.05, -0.1, -1.6, -1.57, -2.0], dtype=np.float64
 )
-_X5_JOINT_POSITION_HIGH = np.array(
-    [2.618, 3.5, 3.2, 1.55, 1.57, 2.0], dtype=np.float64
-)
+_X5_JOINT_POSITION_HIGH = np.array([2.618, 3.5, 3.2, 1.55, 1.57, 2.0], dtype=np.float64)
 _X5_GRIPPER_WIDTH = 0.088
 
 # 三个名称同时承担两层职责：
@@ -96,6 +94,8 @@ class ArxX5DualRobotConfig:
         task_description: 发送给 π0.5 的语言任务指令。
         skip_interface_check: 为 True 时跳过 Linux CAN 接口存在性与 UP 状态检查。
             仅在特殊调试场景下使用，正常运行应保持 False。
+        dry_run: 为 True 时连接机械臂和相机并读取真实观测，但控制器保持阻尼
+            模式，模型动作只记录和校验，绝不调用 ``set_joint_cmd``。
         is_dummy: 为 True 时不连接机械臂和相机，使用零图像和内存状态测试链路。
     """
 
@@ -126,6 +126,7 @@ class ArxX5DualRobotConfig:
     max_num_steps: int = 300
     task_description: str = ""
     skip_interface_check: bool = False
+    dry_run: bool = False
     is_dummy: bool = False
 
     def __post_init__(self) -> None:
@@ -157,6 +158,10 @@ class ArxX5DualRobotConfig:
             raise ValueError("step_frequency 必须大于 0。")
         if self.max_num_steps <= 0:
             raise ValueError("max_num_steps 必须大于 0。")
+        if self.dry_run and self.is_dummy:
+            raise ValueError(
+                "dry_run 和 is_dummy 不能同时启用；请选择真实硬件或纯模拟模式。"
+            )
 
         if not self.is_dummy:
             missing = [
@@ -214,8 +219,8 @@ class ArxX5DualEnv(gym.Env):
             env_idx: 当前环境编号，用于日志定位。
 
         Effects:
-            真实模式下会立即创建两个 ARX SDK 后台线程并打开三路相机；dummy
-            模式下只创建内存状态和零图像，不触碰任何硬件。
+            真实模式下会立即创建两个 ARX SDK 后台线程并打开三路相机；硬件
+            dry-run 保持控制器处于阻尼模式；dummy 模式只创建内存状态和零图像。
         """
 
         del hardware_info
@@ -237,6 +242,10 @@ class ArxX5DualEnv(gym.Env):
             self._set_dummy_limits()
         else:
             self._setup_hardware()
+            if self.config.dry_run:
+                self._logger.warning(
+                    "ARX hardware dry-run 已启用：读取真实状态和相机，但不会发送任何动作命令。"
+                )
 
         self._init_action_observation_spaces()
 
@@ -256,9 +265,7 @@ class ArxX5DualEnv(gym.Env):
         self._joint_position_low = np.stack([_X5_JOINT_POSITION_LOW] * 2)
         self._joint_position_high = np.stack([_X5_JOINT_POSITION_HIGH] * 2)
         self._gripper_position_low = np.zeros(2, dtype=np.float64)
-        self._gripper_position_high = np.full(
-            2, _X5_GRIPPER_WIDTH, dtype=np.float64
-        )
+        self._gripper_position_high = np.full(2, _X5_GRIPPER_WIDTH, dtype=np.float64)
 
     @staticmethod
     def _check_can_interface(interface: str) -> None:
@@ -310,20 +317,21 @@ class ArxX5DualEnv(gym.Env):
             self._left_controller.close()
             raise
 
-        # 控制器构造后处于阻尼/被动模式。按参考项目流程，先写入当前位置再设置
-        # 增益，避免首次 set_joint_cmd 从零命令跳变到目标位置。
-        self._left_controller.enable_position_control(
-            kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
-        )
-        try:
-            self._right_controller.enable_position_control(
+        # hardware dry-run 必须保持 SDK 的默认阻尼/被动模式。正式运行才按参考
+        # 流程写入当前位置并设置位置环增益，避免首次动作从零命令跳变。
+        if not self.config.dry_run:
+            self._left_controller.enable_position_control(
                 kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
             )
-        except Exception:
-            self._left_controller.set_to_damping()
-            self._left_controller.close()
-            self._right_controller.close()
-            raise
+            try:
+                self._right_controller.enable_position_control(
+                    kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
+                )
+            except Exception:
+                self._left_controller.set_to_damping()
+                self._left_controller.close()
+                self._right_controller.close()
+                raise
 
         raw_low = np.stack(
             [
@@ -484,9 +492,7 @@ class ArxX5DualEnv(gym.Env):
                 f"相机 {name!r} 必须返回 HWC 彩色图像，实际为 {array.shape}。"
             )
         if array.dtype != np.uint8:
-            raise ValueError(
-                f"相机 {name!r} 返回 dtype {array.dtype!r}；期望 uint8。"
-            )
+            raise ValueError(f"相机 {name!r} 返回 dtype {array.dtype!r}；期望 uint8。")
         if not np.all(np.isfinite(array)):
             raise ValueError(f"相机 {name!r} 图像包含 NaN 或 Inf。")
         return array
@@ -696,12 +702,12 @@ class ArxX5DualEnv(gym.Env):
             - ``reward``：当前动作桥接版本固定为 0.0；
             - ``terminated``：当前没有任务成功判断，固定为 False；
             - ``truncated``：达到 ``max_num_steps`` 时为 True；
-            - ``info``：同时记录 π0.5 请求动作和经过安全限制的实际执行动作。
+            - ``info``：记录请求动作、安全限制后的候选动作及是否真实发送。
 
         Effects:
-            真实模式下向左右 ARX 控制器下发绝对目标，等待本 Env 控制周期结束，
-            然后读取新的机器人状态和三路图像。dummy 模式只更新内存状态。
-            每一步都会在终端日志中输出模型原始动作和安全限制后的实际动作。
+            正式模式向左右 ARX 控制器下发绝对目标；hardware dry-run 只读取
+            真实状态和图像，不发送动作；dummy 模式只更新内存状态。每一步都会
+            记录模型原始动作和经过安全限制的候选动作。
 
         Raises:
             ValueError: action 不是 ``(14,)``，或包含 NaN/Inf。
@@ -720,7 +726,7 @@ class ArxX5DualEnv(gym.Env):
 
         executed_action = self._limit_absolute_action(requested_action.copy())
         self._logger.info(
-            "π0.5 生成的 14 维绝对动作：requested_action=%s, executed_action=%s",
+            "π0.5 生成的 14 维绝对动作：requested_action=%s, limited_action=%s",
             np.array2string(
                 requested_action, precision=6, separator=", ", max_line_width=1000
             ),
@@ -728,13 +734,17 @@ class ArxX5DualEnv(gym.Env):
                 executed_action, precision=6, separator=", ", max_line_width=1000
             ),
         )
+        action_sent = False
         if self.config.is_dummy:
             self._left_state.joint_position = executed_action[:6].copy()
             self._left_state.gripper_position = float(executed_action[6])
             self._right_state.joint_position = executed_action[7:13].copy()
             self._right_state.gripper_position = float(executed_action[13])
+        elif self.config.dry_run:
+            self._logger.info("hardware dry-run：候选动作未发送到机械臂。")
         else:
             self._send_absolute_action(executed_action)
+            action_sent = True
 
         elapsed = time.monotonic() - start_time
         time.sleep(max(0.0, 1.0 / self.config.step_frequency - elapsed))
@@ -752,6 +762,14 @@ class ArxX5DualEnv(gym.Env):
         info = {
             "requested_action": requested_action.astype(np.float32),
             "executed_action": executed_action.astype(np.float32),
+            "action_sent": action_sent,
+            "dry_run_mode": (
+                "distributed"
+                if self.config.is_dummy
+                else "hardware"
+                if self.config.dry_run
+                else "disabled"
+            ),
         }
         return observation, 0.0, False, truncated, info
 
