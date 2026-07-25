@@ -125,6 +125,7 @@ install_deps_apt() {
         libgomp1 \
         libexpat1 \
         libfontconfig1-dev \
+        python3-dev \
         libpython3-stdlib \
         imagemagick \
         libmagickwand-dev \
@@ -266,6 +267,7 @@ install_deps_pacman() {
         libgomp \
         expat \
         fontconfig \
+        python \
         numactl \
         imagemagick || {
             echo "pacman install failed. Please check your repositories or install dependencies manually." >&2

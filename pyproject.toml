@@ -153,7 +153,9 @@ arx_x5_dual = [
     "pyyaml",
     "numpy==1.26.4",
     "gymnasium==0.29.1",
-    "opencv-python",
+    # LeRobot requires the headless distribution. Use the real-world check
+    # with --headless; installing opencv-python alongside it corrupts cv2.
+    "opencv-python-headless==4.11.0.86",
     "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "imageio[ffmpeg]",
     "evdev",
@@ -191,7 +193,7 @@ override-dependencies = [
     "torch==2.6.0",
     "torchvision==0.21.0",
     "torchaudio==2.6.0",
-    "torchcodec==0.2",
+    "torchcodec==0.2.1",
     "xgrammar==0.1.19",
     "uvloop==0.21.0",
     "tensorflow-addons==0.23.0 ; platform_machine == 'x86_64'",

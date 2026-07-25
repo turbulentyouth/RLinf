@@ -1,0 +1,7 @@
+# Runtime ABI and core dependency pins shared by RLinf, LeRobot, pyarx, and
+# xense-openpi. requirements/install.sh exports this file through
+# UV_CONSTRAINT before any model/SDK-specific uv pip install commands.
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+sympy==1.13.1
+torchcodec==0.2.1

@@ -10,8 +10,9 @@ VENV_DIR=".venv"
 PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
 ARX5_SDK_COMMIT="a1188874d5a50aa61dec4f0b8fec6af77638b390"
-OPENPI_REPO_URL="${OPENPI_REPO_URL:-https://github.com/Vertax42/xense-openpi}"
-OPENPI_PYTHON_VERSION="${OPENPI_PYTHON_VERSION:-3.12.14}"
+OPENPI_REPO_URL="${OPENPI_REPO_URL:-https://github.com/turbulentyouth/xense-openpi}"
+OPENPI_COMMIT="${OPENPI_COMMIT:-c3defef9ef647e8c7bc93fc73e9dae11b9c82e8a}"
+OPENPI_PYTHON_VERSION="${OPENPI_PYTHON_VERSION:-3.12}"
 TORCH_VERSION=""
 SGLANG_VERSION=""
 TRANSFORMERS_VERSION=""
@@ -663,7 +664,7 @@ apply_torch_override() {
     # torchcodec pin for non-x86_64 / non-CUDA torch combos), or
     # PLATFORM_EXTRA_OVERRIDES has entries (insert extra override pins).
 
-    # torchcodec==0.2 only has wheels for torch<=2.6. Relax the pin whenever
+    # torchcodec==0.2.x only has wheels for torch<=2.6. Relax the pin whenever
     # the effective torch version exceeds 2.6, regardless of platform.
     local _eff_torch="${TORCH_VERSION}"
     if [ -z "$_eff_torch" ] && [ -f "$PYPROJECT_FILE" ]; then
@@ -697,13 +698,13 @@ apply_torch_override() {
     trap 'restore_pyproject' EXIT INT TERM HUP
 
     if [ "$PLATFORM_RELAX_TORCHCODEC" -eq 1 ]; then
-        # The pyproject.toml `torchcodec==0.2` override only has wheels for
+        # The pyproject.toml `torchcodec==0.2.x` override only has wheels for
         # x86_64 + torch ~2.5/2.6. It breaks on AMD (our torch override pins
         # 2.8 from the rocm index) and on Ascend (typically aarch64, where
         # 0.2.x has no wheels). Relaxing to >=0.5 lets uv pick a wheel for
         # the resolved environment; transitive pins like lerobot==0.1.0's
         # ==0.2 are superseded by override-dependencies.
-        sed -i 's/"torchcodec==0\.2"/"torchcodec>=0.5"/' "$PYPROJECT_FILE"
+        sed -i -E 's/"torchcodec==0\.2(\.[0-9]+)?"/"torchcodec>=0.5"/' "$PYPROJECT_FILE"
         echo "[install.sh] Relaxed torchcodec override to >=0.5 for ${PLATFORM} compatibility"
     fi
 
@@ -1092,11 +1093,13 @@ clone_or_reuse_repo() {
 
 #=======================EMBODIED INSTALLERS=======================
 install_common_embodied_deps() {
-    uv sync --extra embodied --active $NO_INSTALL_RLINF_CMD
-    uv pip install -r $SCRIPT_DIR/embodied/envs/common.txt
+    # Install compiler toolchains and Python headers before resolving packages
+    # such as evdev that may need to build a C extension from source.
     if [ "$NO_ROOT" -eq 0 ]; then
         bash $SCRIPT_DIR/sys_deps.sh "$PLATFORM"
     fi
+    uv sync --extra embodied --active $NO_INSTALL_RLINF_CMD
+    uv pip install -r $SCRIPT_DIR/embodied/envs/common.txt
     if [ ${#PLATFORM_VENV_EXPORTS[@]} -gt 0 ]; then
         printf '%s\n' "${PLATFORM_VENV_EXPORTS[@]}" >> "$VENV_DIR/bin/activate"
     fi
@@ -1342,11 +1345,17 @@ install_openpi_model() {
         arx_x5_dual)
             create_and_sync_venv
             install_common_embodied_deps
-            # embodied 和 arx_x5_dual extras 在 pyproject.toml 中声明为冲突，
-            # 因此按顺序安装，并用 --inexact 保留前面已经装好的公共依赖。
+            # Keep the headless OpenCV provider required by LeRobot. Resolve
+            # the final NumPy ABI before installing xense-openpi or compiling
+            # the ARX5 extension.
+            uv pip uninstall opencv-python || true
             uv sync --extra arx_x5_dual --inexact --active $NO_INSTALL_RLINF_CMD
-            install_arx_x5_dual_env
+            export UV_CONSTRAINT="$SCRIPT_DIR/embodied/envs/arx_x5_dual_constraints.txt"
+            # Align an existing/reused venv once, then let UV_CONSTRAINT guard
+            # every downstream uv pip install in this OpenPI + ARX5 flow.
+            uv pip install -r "$UV_CONSTRAINT"
             install_xense_openpi
+            install_arx_x5_dual_env
             install_flash_attn
             ;;
         polaris)
@@ -1365,7 +1374,7 @@ install_openpi_model() {
     # openpi/orbax require jax.experimental.layout.DeviceLocalLayout (removed in jax>=0.7.0).
     uv pip install -r "$SCRIPT_DIR/embodied/models/openpi.txt"
 
-    # xense-openpi uses transformers>=5.3.0 and keeps Pi0 deltas as HF subclasses
+    # xense-openpi uses transformers>=5.5,<5.6 and keeps Pi0 deltas as HF subclasses
     # under openpi/models_pytorch/transformers_compat/. The old transformers_replace
     # source-tree patch only exists for the original RLinf/openpi (transformers 4.53.2).
     # Conditionally copy so the install does not fail when the directory is absent.
@@ -1386,6 +1395,9 @@ EOF
 
     bash $SCRIPT_DIR/embodied/download_assets.sh --assets openpi
     uv pip uninstall pynvml || true
+    if [ "$ENV_NAME" = "arx_x5_dual" ]; then
+        verify_arx_x5_openpi_stack
+    fi
 }
 
 install_starvla_model() {
@@ -1664,34 +1676,76 @@ install_lerobot() {
 }
 
 install_xense_openpi() {
-    # Clone and install the xense-openpi repo and its workspace package.
-    #
-    # xense-openpi (Vertax42/xense-openpi) is a fork of openpi that targets
-    # transformers>=5.3.0 and keeps the Pi0 deltas as HF subclasses under
-    # openpi/models_pytorch/transformers_compat/ instead of the old
-    # transformers_replace/ source-tree patch. It also ships a workspace
-    # package packages/xense-client that openpi depends on, so we must
-    # install both in editable mode.
-
+    # Install the pinned inference-only fork. RLinf owns LeRobot, OpenCV, and
+    # the NumPy ABI; the fork deliberately leaves those integrations optional.
     local xense_openpi_dir
     xense_openpi_dir=$(clone_or_reuse_repo XENSE_OPENPI_PATH \
         "$VENV_DIR/xense-openpi" \
         "${GITHUB_PREFIX}${OPENPI_REPO_URL}")
 
-    echo "Installing xense-openpi and xense-client workspace packages..."
-    uv pip install -e "$xense_openpi_dir"
-    uv pip install -e "$xense_openpi_dir/packages/xense-client"
+    if [ -n "$(git -C "$xense_openpi_dir" status --porcelain)" ]; then
+        echo "xense-openpi checkout has local changes: $xense_openpi_dir" >&2
+        echo "Commit or stash them before installing." >&2
+        exit 1
+    fi
+    if ! git -C "$xense_openpi_dir" cat-file -e "$OPENPI_COMMIT^{commit}" 2>/dev/null; then
+        git -C "$xense_openpi_dir" fetch \
+            "${GITHUB_PREFIX}${OPENPI_REPO_URL}" "$OPENPI_COMMIT"
+    fi
+    git -C "$xense_openpi_dir" checkout --detach "$OPENPI_COMMIT"
 
-    # Smoke-test the key imports that RLinf's OpenPI wrapper needs. This catches
-    # workspace-package or transformers-version issues before the full install
-    # proceeds to flash-attn and asset downloads.
+    echo "Installing pinned xense-client and xense-openpi inference packages..."
+    uv pip install -e "$xense_openpi_dir/packages/xense-client"
+    uv pip install -e "$xense_openpi_dir"
+
+    # Check both the import surface used by RLinf and the installed metadata.
+    # A future fork update must not silently reclaim LeRobot or OpenCV.
     python - <<'PY'
+from importlib import metadata
+
+import numpy as np
+from packaging.requirements import Requirement
+
 import openpi
 from openpi.models import model as _model
 from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks
 from openpi.training.config import DataConfig, DataConfigFactory, ModelTransformFactory
-print("xense-openpi imports OK")
+
+blocked = {"lerobot", "opencv-python", "opencv-python-headless"}
+requirements = metadata.requires("openpi") or []
+unexpected = sorted(
+    requirement
+    for requirement in requirements
+    if Requirement(requirement).name.lower() in blocked
+    and Requirement(requirement).marker is None
+)
+assert not unexpected, f"xense-openpi reclaimed RLinf-owned deps: {unexpected}"
+assert int(np.__version__.split(".", 1)[0]) < 2, np.__version__
+print("xense-openpi inference imports and dependency boundary OK")
+PY
+}
+
+verify_arx_x5_openpi_stack() {
+    python - <<'PY'
+from importlib import metadata
+
+import cv2
+import numpy as np
+import pyarx as arx5
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from openpi.models.pi0_config import Pi0Config
+from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
+
+assert np.__version__ == "1.26.4", np.__version__
+assert cv2.__version__ == "4.11.0", cv2.__version__
+assert metadata.version("lerobot") == "0.1.0", metadata.version("lerobot")
+assert metadata.version("sympy") == "1.13.1", metadata.version("sympy")
+assert metadata.version("torchcodec") == "0.2.1", metadata.version("torchcodec")
+assert hasattr(arx5, "Arx5JointController")
+assert hasattr(arx5, "RobotConfigFactory")
+assert hasattr(arx5, "ControllerConfigFactory")
+print("RLinf + pyarx + xense-openpi compatibility check OK")
 PY
 }
 
@@ -2129,6 +2183,34 @@ install_arx_x5_dual_env() {
     local runtime_python
     runtime_python="$(realpath "$VENV_DIR/bin/python")"
 
+    # Ubuntu's Python.h delegates to a multiarch pyconfig.h under
+    # /usr/include/<triplet>/pythonX.Y. Conda compilers do not search the host
+    # multiarch root, so expose only that generated header through an overlay
+    # instead of adding all of /usr/include to the Conda sysroot.
+    local runtime_pyconfig
+    runtime_pyconfig="$(
+        "$runtime_python" - <<'PY'
+import pathlib
+import sysconfig
+
+multiarch = sysconfig.get_config_var("MULTIARCH")
+version = sysconfig.get_config_var("VERSION")
+if multiarch and version:
+    candidate = pathlib.Path("/usr/include") / multiarch / f"python{version}" / "pyconfig.h"
+    if candidate.is_file():
+        print(candidate)
+PY
+    )"
+    local python_include_overlay=""
+    local python_build_cpath="${CPATH:-}"
+    if [ -n "$runtime_pyconfig" ]; then
+        local pyconfig_relative="${runtime_pyconfig#/usr/include/}"
+        python_include_overlay="$arx5_build_dir/python-host-include"
+        mkdir -p "$python_include_overlay/$(dirname "$pyconfig_relative")"
+        ln -sf "$runtime_pyconfig" "$python_include_overlay/$pyconfig_relative"
+        python_build_cpath="$python_include_overlay${python_build_cpath:+:$python_build_cpath}"
+    fi
+
     echo "ARX5 conda env: $arx5_conda_env"
     echo "ARX5 SDK dir:   $arx5_sdk_dir"
     echo "ARX5 build dir: $arx5_build_dir"
@@ -2151,6 +2233,7 @@ install_arx_x5_dual_env() {
     env \
         CONDA_PREFIX="$arx5_conda_env" \
         PATH="$arx5_conda_env/bin:$PATH" \
+        CPATH="$python_build_cpath" \
         PYTHONPATH="$ament_site_packages${PYTHONPATH:+:$PYTHONPATH}" \
         "$arx5_conda_env/bin/cmake" \
             -S "$arx5_sdk_dir" \
@@ -2172,6 +2255,7 @@ install_arx_x5_dual_env() {
     env \
         CONDA_PREFIX="$arx5_conda_env" \
         PATH="$arx5_conda_env/bin:$PATH" \
+        CPATH="$python_build_cpath" \
         PYTHONPATH="$ament_site_packages${PYTHONPATH:+:$PYTHONPATH}" \
         "$arx5_conda_env/bin/cmake" \
             --build "$arx5_build_dir" \
@@ -2208,7 +2292,7 @@ install_arx_x5_dual_env() {
     echo
     echo "  source \"$VENV_DIR/bin/activate\""
     echo "  python toolkits/realworld_check/test_arx_x5_dual.py \\"
-    echo "    --left-interface can1 --right-interface can3"
+    echo "    --headless --left-interface can1 --right-interface can3"
 }
 
 install_robotwin_env() {
