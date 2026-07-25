@@ -98,6 +98,7 @@ class _FakeRobotConfigFactory:
             joint_pos_max=np.full(6, 2.0, dtype=np.float64),
             joint_vel_max=np.ones(6, dtype=np.float64),
             gripper_width=0.088,
+            gripper_vel_max=0.5,
         )
 
 
@@ -120,6 +121,10 @@ class _FakeControllerConfigFactory:
             default_preview_time=0.1,
             background_send_recv=False,
             shutdown_to_passive=False,
+            default_kp=np.full(6, 80.0, dtype=np.float64),
+            default_kd=np.full(6, 10.0, dtype=np.float64),
+            default_gripper_kp=40.0,
+            default_gripper_kd=5.0,
         )
 
 
@@ -135,6 +140,7 @@ class _FakeArx5JointController:
         self.state = _FakeJointState(robot_config.joint_dof)
         self.last_command = None
         self.damping_enabled = False
+        self._gain = None
         self.__class__.instances.append(self)
 
     def get_joint_state(self):
@@ -147,10 +153,35 @@ class _FakeArx5JointController:
 
         return SimpleNamespace(pose_6d=lambda: np.zeros(6, dtype=np.float64))
 
+    def get_timestamp(self):
+        """返回模拟控制器时间戳。"""
+
+        return 1.0
+
+    def get_robot_config(self):
+        """返回传入的机器人配置。"""
+
+        return self.robot_config
+
+    def get_controller_config(self):
+        """返回传入的控制器配置。"""
+
+        return self.controller_config
+
+    def get_gain(self):
+        """返回最近一次设置的增益。"""
+
+        return self._gain
+
     def set_joint_cmd(self, command):
         """保存绝对关节命令，供断言检查。"""
 
         self.last_command = command
+
+    def set_gain(self, gain):
+        """保存最近一次设置的增益。"""
+
+        self._gain = gain
 
     def set_to_damping(self):
         """记录控制器已经进入阻尼模式。"""
@@ -179,6 +210,22 @@ class _FakeCamera:
         self.closed = True
 
 
+class _FakeGain:
+    """模拟 ARX SDK 的 Gain，支持 kp()/kd() 方法。"""
+
+    def __init__(self, joint_dof: int):
+        self._kp = np.zeros(joint_dof, dtype=np.float64)
+        self._kd = np.zeros(joint_dof, dtype=np.float64)
+        self.gripper_kp = 0.0
+        self.gripper_kd = 0.0
+
+    def kp(self):
+        return self._kp
+
+    def kd(self):
+        return self._kd
+
+
 def _fake_sdk():
     """组装与当前封装所用 API 一致的最小 ARX SDK。"""
 
@@ -188,6 +235,7 @@ def _fake_sdk():
         ControllerConfigFactory=_FakeControllerConfigFactory,
         Arx5JointController=_FakeArx5JointController,
         JointState=_FakeJointState,
+        Gain=_FakeGain,
     )
 
 
@@ -215,6 +263,15 @@ def test_joint_controller_sends_absolute_joint_command(monkeypatch):
     state = controller.read_state()
     assert state.joint_position.shape == (6,)
     assert state.eef_pose_6d.shape == (6,)
+    assert state.controller_timestamp == pytest.approx(1.0)
+
+    controller.enable_position_control(kp_scale=0.5, kd_scale=1.5)
+    gain = sdk_controller.get_gain()
+    assert gain is not None
+    np.testing.assert_allclose(gain.kp(), np.full(6, 40.0))
+    np.testing.assert_allclose(gain.kd(), np.full(6, 15.0))
+    assert gain.gripper_kp == pytest.approx(40.0)
+    assert gain.gripper_kd == pytest.approx(5.0)
 
     with pytest.raises(ValueError, match="超出 ARX SDK 硬件范围"):
         controller.send_absolute_joint_position(np.full(6, 3.0), 0.04)

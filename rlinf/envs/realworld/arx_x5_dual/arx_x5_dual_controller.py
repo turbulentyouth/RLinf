@@ -16,6 +16,9 @@
 
 from __future__ import annotations
 
+import os
+import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -25,8 +28,26 @@ from rlinf.utils.logging import get_logger
 from .arx_x5_dual_robot_state import ArxX5ArmState
 
 
+def _ensure_ament_prefix_path() -> None:
+    """确保 ARX5 conda 环境在 ``AMENT_PREFIX_PATH`` 中。
+
+    ``pyarx`` 在导入时会通过 ``ament_index_python`` 定位 ROS 2 资源。如果
+    运行前没有手动 source conda 环境，导入会失败。测试脚本
+    ``toolkits/realworld_check/test_arx_x5_dual.py`` 采用同样的修复方式：把
+    ``REPO_ROOT/.venv/arx5-conda-env`` 添加到 ``AMENT_PREFIX_PATH`` 头部。
+    """
+
+    repo_root = Path(__file__).resolve().parents[4]
+    arx5_prefix = str(repo_root / ".venv" / "arx5-conda-env")
+    entries = [
+        path for path in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep) if path
+    ]
+    if arx5_prefix not in entries:
+        os.environ["AMENT_PREFIX_PATH"] = os.pathsep.join([arx5_prefix, *entries])
+
+
 class ArxX5JointController:
-    """把 ``arx5-interface`` 封装成 RLinf 环境可调用的单臂控制接口。
+    """把 ``pyarx`` 封装成 RLinf 环境可调用的单臂控制接口。
 
     ARX SDK 自己会在 C++ 后台线程中以高频率进行 CAN 收发。RLinf 环境只需要
     以较低频率更新绝对关节目标。每次更新的目标会被写入 SDK 插值器，然后由
@@ -35,6 +56,11 @@ class ArxX5JointController:
     这个类不负责左右臂动作的拼接。一个实例只连接一条机械臂；双臂环境会创建
     两个实例，并在同一个 ``env.step()`` 中依次更新左右臂目标。
 
+    控制结构参考 ``toolkits/realworld_check/test_arx_x5_dual.py``：500 Hz SDK
+    后台通信、50 Hz 命令插值、30 ms 命令预览。控制器构造后处于阻尼/被动模式；
+    环境必须调用 ``enable_position_control`` 按参考比例设置位置环增益
+    （``kp_scale=0.5``、``kd_scale=1.5``）并写入当前位置作为插值起点。
+
     Args:
         model: ARX 机器人型号。当前任务使用 ``"X5"``。型号填写错误可能导致
             危险运动，因此不会在代码中自动猜测型号。
@@ -42,16 +68,17 @@ class ArxX5JointController:
         controller_dt: SDK 后台控制周期，单位为秒。ARX 官方默认值是
             ``0.002``，也就是 500 Hz。
         preview_time: 新关节目标的插值预览时间，单位为秒。大于零时，SDK 会
-            在当前命令和新目标之间插值，避免直接跳到目标位置。
+            在当前命令和新目标之间插值，避免直接跳到目标位置。参考项目使用
+            ``0.03``。
         joint_velocity_limit_scale: 对 SDK 原始关节速度上限进行缩放。比如
             ``0.2`` 表示只允许使用官方速度上限的 20%。SDK 官方建议在部署
             初期主动降低速度限制。
-        sdk_module: 仅供无硬件单元测试注入假的 ``arx5_interface`` 模块。
-            正常运行时必须保持为 ``None``，届时函数会延迟导入真实 SDK。
+        sdk_module: 仅供无硬件单元测试注入假的 ``pyarx`` 模块。正常运行时
+            必须保持为 ``None``，届时函数会延迟导入真实 SDK。
 
     Raises:
         ValueError: 参数非法，或者 SDK 返回的机械臂不是 6 自由度。
-        ModuleNotFoundError: 机器人节点没有安装 ``arx5-interface``。
+        ModuleNotFoundError: 机器人节点没有安装 ``pyarx``。
     """
 
     JOINT_DOF = 6
@@ -92,7 +119,7 @@ class ArxX5JointController:
         model: str,
         interface_name: str,
         controller_dt: float = 0.002,
-        preview_time: float = 0.1,
+        preview_time: float = 0.03,
         joint_velocity_limit_scale: float = 0.2,
         sdk_module: Any | None = None,
     ) -> None:
@@ -111,7 +138,8 @@ class ArxX5JointController:
         if sdk_module is None:
             # 延迟导入非常重要：GPU 服务器不需要安装 ARX SDK。只有被 Ray
             # 放置到机器人电脑上的 Env Worker 创建该对象时才导入硬件依赖。
-            import arx5_interface as sdk_module
+            _ensure_ament_prefix_path()
+            import pyarx as sdk_module
 
         self._arx5 = sdk_module
         robot_config = sdk_module.RobotConfigFactory.get_instance().get_config(model)
@@ -145,6 +173,52 @@ class ArxX5JointController:
             controller_config,
             interface_name,
         )
+
+    def enable_position_control(self, kp_scale: float = 0.5, kd_scale: float = 1.5) -> None:
+        """按参考流程启用位置控制。
+
+        与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持一致：
+
+        1. 读取当前关节/夹爪状态；
+        2. 把当前位置写入 SDK 命令缓冲区，让控制器从当前姿态开始插值；
+        3. 等待 ``max(preview_time, controller_dt * 2)``，让后台线程收到命令；
+        4. 按 ``kp_scale`` / ``kd_scale`` 设置位置环增益。
+
+        控制器构造后默认处于阻尼/被动模式， Env 必须在发送第一条动作前调用
+        本函数，否则首次 ``set_joint_cmd`` 可能从零命令跳变到目标位置。
+
+        Args:
+            kp_scale: 对 SDK 默认关节 ``kp`` 的缩放比例。
+            kd_scale: 对 SDK 默认关节 ``kd`` 的缩放比例。
+        """
+
+        if self._closed:
+            raise RuntimeError(f"ARX 控制器 {self.interface_name!r} 已经关闭。")
+        if kp_scale <= 0:
+            raise ValueError("kp_scale 必须大于 0。")
+        if kd_scale <= 0:
+            raise ValueError("kd_scale 必须大于 0。")
+
+        state = self._controller.get_joint_state()
+        command = self._arx5.JointState(self.JOINT_DOF)
+        command.pos()[:] = self._copy_finite_vector(
+            "current_joint_position", state.pos(), self.JOINT_DOF
+        )
+        command.gripper_pos = float(
+            self._copy_finite_vector(
+                "current_gripper_position", [state.gripper_pos], 1
+            )[0]
+        )
+        self._controller.set_joint_cmd(command)
+        time.sleep(max(self._controller_config.default_preview_time, self._controller_config.controller_dt * 2))
+
+        config = self._controller.get_controller_config()
+        gain = self._arx5.Gain(self.JOINT_DOF)
+        gain.kp()[:] = np.asarray(config.default_kp, dtype=np.float64) * kp_scale
+        gain.kd()[:] = np.asarray(config.default_kd, dtype=np.float64) * kd_scale
+        gain.gripper_kp = config.default_gripper_kp
+        gain.gripper_kd = config.default_gripper_kd
+        self._controller.set_gain(gain)
 
     @property
     def joint_position_low(self) -> np.ndarray:
@@ -191,11 +265,18 @@ class ArxX5JointController:
         joint_state = self._controller.get_joint_state()
         eef_state = self._controller.get_eef_state()
         timestamp = float(joint_state.timestamp)
+        controller_timestamp = float(self._controller.get_timestamp())
         gripper_position = float(joint_state.gripper_pos)
         gripper_velocity = float(joint_state.gripper_vel)
         gripper_torque = float(joint_state.gripper_torque)
         scalar_values = np.asarray(
-            [timestamp, gripper_position, gripper_velocity, gripper_torque],
+            [
+                timestamp,
+                controller_timestamp,
+                gripper_position,
+                gripper_velocity,
+                gripper_torque,
+            ],
             dtype=np.float64,
         )
         if not np.all(np.isfinite(scalar_values)):
@@ -203,6 +284,7 @@ class ArxX5JointController:
 
         return ArxX5ArmState(
             timestamp=timestamp,
+            controller_timestamp=controller_timestamp,
             joint_position=self._copy_finite_vector(
                 "joint_position", joint_state.pos(), self.JOINT_DOF
             ),

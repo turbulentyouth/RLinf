@@ -29,7 +29,9 @@ class ArxX5ArmState:
     ``[左臂 6 关节, 左夹爪, 右臂 6 关节, 右夹爪]``。
 
     Attributes:
-        timestamp: SDK 控制器时间戳，单位由 ARX SDK 定义。
+        timestamp: SDK 关节状态时间戳，单位由 ARX SDK 定义。
+        controller_timestamp: SDK 控制器时间戳，通常与 ``timestamp`` 同源但
+            更新时机不同。保留两者便于排查通信延迟。
         joint_position: 6 个关节的绝对角度，形状为 ``(6,)``，单位为弧度。
         joint_velocity: 6 个关节速度，形状为 ``(6,)``。
         joint_torque: 6 个关节力矩，形状为 ``(6,)``。
@@ -42,6 +44,7 @@ class ArxX5ArmState:
     """
 
     timestamp: float = 0.0
+    controller_timestamp: float = 0.0
     joint_position: np.ndarray = field(default_factory=lambda: np.zeros(6))
     joint_velocity: np.ndarray = field(default_factory=lambda: np.zeros(6))
     joint_torque: np.ndarray = field(default_factory=lambda: np.zeros(6))

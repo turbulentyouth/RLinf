@@ -64,9 +64,13 @@ override_cfg:
   controller_warmup_time: 0.5
   step_frequency: 10.0
 
-  # SDK 在 0.1 秒内插值到新目标；同时将官方速度上限缩小到 20%。
-  command_preview_time: 0.1
+  # SDK 在 0.03 秒内插值到新目标；同时将官方速度上限缩小到 20%。
+  command_preview_time: 0.03
   joint_velocity_limit_scale: 0.2
+
+  # 参考项目使用的位置环增益缩放：降低 kp、提高 kd，减小首次上电冲击。
+  kp_scale: 0.5
+  kd_scale: 1.5
 
   # 从硬限位两端各缩进 5%，并限制每次 Env step 最多变化 0.1 rad。
   # π0.5 输出和最终 SDK 命令仍然都是“绝对关节位置”，不是 delta 动作。
@@ -79,4 +83,5 @@ override_cfg:
 
   max_num_steps: 300
   task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
+  skip_interface_check: false
   is_dummy: false

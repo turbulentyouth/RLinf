@@ -20,6 +20,7 @@ import copy
 import queue
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import cv2
@@ -81,8 +82,11 @@ class ArxX5DualRobotConfig:
         camera_frame_timeout: 单次等待相机帧的最长时间，单位为秒。
         controller_dt: ARX SDK 后台 CAN 控制周期，默认 0.002 秒（500 Hz）。
         controller_warmup_time: 创建控制器后等待首批真实反馈的时间，单位为秒。
-        command_preview_time: SDK 对新绝对关节目标做插值的预览时间。
+        command_preview_time: SDK 对新绝对关节目标做插值的预览时间。参考项目
+            使用 0.03 秒。
         joint_velocity_limit_scale: SDK 原始关节速度上限缩放比例。
+        kp_scale: 对 SDK 默认关节 ``kp`` 的缩放比例。参考项目使用 0.5。
+        kd_scale: 对 SDK 默认关节 ``kd`` 的缩放比例。参考项目使用 1.5。
         joint_limit_margin_ratio: 从关节硬限位两端各缩进的比例。例如 0.05
             表示只使用中间 90% 的关节范围。
         max_joint_delta_per_step: 每个 Env step 允许的最大关节变化，单位弧度。
@@ -90,6 +94,8 @@ class ArxX5DualRobotConfig:
         step_frequency: RLinf Env 的目标执行频率。它低于 SDK 后台控制频率。
         max_num_steps: 一条 rollout 最多执行多少个 Env step。
         task_description: 发送给 π0.5 的语言任务指令。
+        skip_interface_check: 为 True 时跳过 Linux CAN 接口存在性与 UP 状态检查。
+            仅在特殊调试场景下使用，正常运行应保持 False。
         is_dummy: 为 True 时不连接机械臂和相机，使用零图像和内存状态测试链路。
     """
 
@@ -110,13 +116,16 @@ class ArxX5DualRobotConfig:
 
     controller_dt: float = 0.002
     controller_warmup_time: float = 0.5
-    command_preview_time: float = 0.1
+    command_preview_time: float = 0.03
     joint_velocity_limit_scale: float = 0.2
+    kp_scale: float = 0.5
+    kd_scale: float = 1.5
     joint_limit_margin_ratio: float = 0.05
     max_joint_delta_per_step: float = 0.1
     step_frequency: float = 10.0
     max_num_steps: int = 300
     task_description: str = ""
+    skip_interface_check: bool = False
     is_dummy: bool = False
 
     def __post_init__(self) -> None:
@@ -136,6 +145,10 @@ class ArxX5DualRobotConfig:
             raise ValueError("command_preview_time 必须大于 0。")
         if not 0 < self.joint_velocity_limit_scale <= 1:
             raise ValueError("joint_velocity_limit_scale 必须位于 (0, 1]。")
+        if self.kp_scale <= 0:
+            raise ValueError("kp_scale 必须大于 0。")
+        if self.kd_scale <= 0:
+            raise ValueError("kd_scale 必须大于 0。")
         if not 0 <= self.joint_limit_margin_ratio < 0.5:
             raise ValueError("joint_limit_margin_ratio 必须位于 [0, 0.5)。")
         if self.max_joint_delta_per_step <= 0:
@@ -247,12 +260,36 @@ class ArxX5DualEnv(gym.Env):
             2, _X5_GRIPPER_WIDTH, dtype=np.float64
         )
 
+    @staticmethod
+    def _check_can_interface(interface: str) -> None:
+        """检查 Linux CAN 接口是否存在且处于 UP 状态。
+
+        与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持一致：在构造
+        控制器前尽早发现接口配置错误，避免后续 SDK 调用返回难以定位的通信
+        超时。/sys/class/net 下的 flags 是十六进制字符串，需要按 16 进制解析。
+        """
+
+        iff_up = 0x1
+        interface_path = Path("/sys/class/net") / interface
+        flags_path = interface_path / "flags"
+        if not flags_path.exists():
+            raise RuntimeError(
+                f"CAN 接口 {interface!r} 不存在；请先配置并启动 ARX CAN 适配器。"
+            )
+        flags = int(flags_path.read_text(encoding="utf-8").strip(), 16)
+        if not flags & iff_up:
+            raise RuntimeError(f"CAN 接口 {interface!r} 存在但未 UP。")
+
     def _setup_hardware(self) -> None:
         """连接左右机械臂，并从 SDK 获取真实关节和夹爪范围。
 
         关节安全边界不是简单地将上下限乘一个系数，而是从完整范围的两端各
         缩进 ``joint_limit_margin_ratio``。这种算法对负数下限和正数上限都成立。
         """
+
+        if not self.config.skip_interface_check:
+            self._check_can_interface(self.config.left_interface)
+            self._check_can_interface(self.config.right_interface)
 
         self._left_controller = ArxX5JointController(
             model=self.config.robot_model,
@@ -271,6 +308,21 @@ class ArxX5DualEnv(gym.Env):
             )
         except Exception:
             self._left_controller.close()
+            raise
+
+        # 控制器构造后处于阻尼/被动模式。按参考项目流程，先写入当前位置再设置
+        # 增益，避免首次 set_joint_cmd 从零命令跳变到目标位置。
+        self._left_controller.enable_position_control(
+            kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
+        )
+        try:
+            self._right_controller.enable_position_control(
+                kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
+            )
+        except Exception:
+            self._left_controller.set_to_damping()
+            self._left_controller.close()
+            self._right_controller.close()
             raise
 
         raw_low = np.stack(
@@ -361,7 +413,12 @@ class ArxX5DualEnv(gym.Env):
         )
 
     def _camera_specs(self) -> list[CameraInfo]:
-        """将三个物理相机序列号映射到固定的 π0.5 图像名称。"""
+        """将三个物理相机序列号映射到固定的 π0.5 图像名称。
+
+        分辨率与帧率与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持
+        一致：640x480 @ 30 fps。最终返回给策略的图像会再被中心裁剪并 resize
+        到 ``image_height x image_width``。
+        """
 
         default_type = self.config.camera_type
         return [
@@ -369,16 +426,25 @@ class ArxX5DualEnv(gym.Env):
                 name=_HEAD_CAMERA_NAME,
                 serial_number=str(self.config.head_camera_serial),
                 camera_type=self.config.head_camera_type or default_type,
+                resolution=(640, 480),
+                fps=30,
+                enable_depth=False,
             ),
             CameraInfo(
                 name=_LEFT_WRIST_CAMERA_NAME,
                 serial_number=str(self.config.left_wrist_camera_serial),
                 camera_type=self.config.left_wrist_camera_type or default_type,
+                resolution=(640, 480),
+                fps=30,
+                enable_depth=False,
             ),
             CameraInfo(
                 name=_RIGHT_WRIST_CAMERA_NAME,
                 serial_number=str(self.config.right_wrist_camera_serial),
                 camera_type=self.config.right_wrist_camera_type or default_type,
+                resolution=(640, 480),
+                fps=30,
+                enable_depth=False,
             ),
         ]
 
@@ -404,6 +470,27 @@ class ArxX5DualEnv(gym.Env):
             self.close()
             raise
 
+    @staticmethod
+    def _validate_camera_frame(name: str, frame: Any) -> np.ndarray:
+        """检查相机帧的形状、类型和数值有效性。
+
+        与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持一致：要求
+        返回 HWC uint8 图像且不含 NaN/Inf。返回数组副本供后续裁剪 resize。
+        """
+
+        array = np.asarray(frame)
+        if array.ndim != 3 or array.shape[-1] < 3:
+            raise ValueError(
+                f"相机 {name!r} 必须返回 HWC 彩色图像，实际为 {array.shape}。"
+            )
+        if array.dtype != np.uint8:
+            raise ValueError(
+                f"相机 {name!r} 返回 dtype {array.dtype!r}；期望 uint8。"
+            )
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"相机 {name!r} 图像包含 NaN 或 Inf。")
+        return array
+
     def _read_camera_frames(self) -> dict[str, np.ndarray]:
         """同步读取三路相机，并转换成 π0.5 所需的 RGB 图像。
 
@@ -414,6 +501,7 @@ class ArxX5DualEnv(gym.Env):
 
         Raises:
             RuntimeError: 某相机在产生第一张有效图像之前就超时。
+            ValueError: 相机返回的帧形状、类型或数值异常。
 
         Notes:
             RLinf 相机后端输出 BGR；函数在 resize 后通过 ``[..., ::-1]``
@@ -435,11 +523,7 @@ class ArxX5DualEnv(gym.Env):
                     )
                 self._logger.warning("相机 %s 读取超时，本 step 使用上一帧。", name)
 
-            frame = np.asarray(frame)
-            if frame.ndim != 3 or frame.shape[-1] < 3:
-                raise RuntimeError(
-                    f"相机 {name!r} 必须返回 HWC 彩色图像，实际为 {frame.shape}。"
-                )
+            frame = self._validate_camera_frame(name, frame)
             # 当前 π0.5 只使用 RGB；如果相机后端额外附带深度通道，仅取前三个
             # BGR 通道，避免 ``[..., ::-1]`` 把深度误当成颜色。
             frame = frame[..., :3]
