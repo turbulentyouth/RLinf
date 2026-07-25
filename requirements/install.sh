@@ -879,23 +879,30 @@ unset_mirror() {
 }
 
 create_and_sync_venv() {
-    local required_python_mm
-    required_python_mm="$(echo "$PYTHON_VERSION" | awk -F. '{print $1"."$2}')"
+    local required_python_parts
+    required_python_parts="$(awk -F. '{print NF}' <<< "$PYTHON_VERSION")"
 
     if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/activate" ]; then
         echo "Found existing venv at $VENV_DIR; validating Python version compatibility..."
         # shellcheck disable=SC1090
         source "$VENV_DIR/bin/activate"
 
-        local active_python_mm
-        active_python_mm="$(python - <<'EOF'
+        local active_python_version
+        active_python_version="$(python - <<'EOF'
 import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}")
+print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
 EOF
 )"
 
-        if [ "$active_python_mm" != "$required_python_mm" ]; then
-            echo "Venv Python version mismatch: required ${required_python_mm}.x (from PYTHON_VERSION=${PYTHON_VERSION}), found ${active_python_mm}.x. Recreating venv..." >&2
+        local python_version_matches=0
+        if [ "$required_python_parts" -eq 3 ] && [ "$active_python_version" = "$PYTHON_VERSION" ]; then
+            python_version_matches=1
+        elif [ "$required_python_parts" -eq 2 ] && [[ "$active_python_version" = "$PYTHON_VERSION".* ]]; then
+            python_version_matches=1
+        fi
+
+        if [ "$python_version_matches" -ne 1 ]; then
+            echo "Venv Python version mismatch: required ${PYTHON_VERSION}, found ${active_python_version}. Recreating venv..." >&2
             deactivate || true
             rm -rf "$VENV_DIR"
 
@@ -905,7 +912,7 @@ EOF
             # shellcheck disable=SC1090
             source "$VENV_DIR/bin/activate"
         else
-            echo "Reusing existing venv at $VENV_DIR"
+            echo "Reusing existing venv at $VENV_DIR (Python ${active_python_version})"
             install_uv
         fi
     else
@@ -915,6 +922,9 @@ EOF
         # shellcheck disable=SC1090
         source "$VENV_DIR/bin/activate"
     fi
+    local resolved_python_version
+    resolved_python_version="$(python -c 'import platform; print(platform.python_version())')"
+    echo "Using venv Python: $(realpath "$VENV_DIR/bin/python") (${resolved_python_version})"
     uv sync --active $NO_INSTALL_RLINF_CMD
 }
 
@@ -2153,8 +2163,26 @@ install_arx_x5_dual_env() {
 
     # ---- 1. 用 conda 安装 C++ 编译依赖（到 SDK 目录下的 conda env） ----
     local arx5_conda_env="$VENV_DIR/arx5-conda-env"
+    local recreate_arx5_conda_env=0
     if [ ! -x "$arx5_conda_env/bin/python" ] || \
     [ ! -f "$arx5_conda_env/share/kdl_parser/cmake/kdl_parserConfig.cmake" ]; then
+        recreate_arx5_conda_env=1
+    else
+        local arx5_conda_python_version
+        arx5_conda_python_version="$($arx5_conda_env/bin/python -c 'import platform; print(platform.python_version())')"
+        if [[ "$PYTHON_VERSION" == *.*.* ]]; then
+            if [ "$arx5_conda_python_version" != "$PYTHON_VERSION" ]; then
+                recreate_arx5_conda_env=1
+            fi
+        elif [[ "$arx5_conda_python_version" != "$PYTHON_VERSION".* ]]; then
+            recreate_arx5_conda_env=1
+        fi
+        if [ "$recreate_arx5_conda_env" -eq 1 ]; then
+            echo "ARX5 Conda Python version mismatch: required ${PYTHON_VERSION}, found ${arx5_conda_python_version}. Recreating environment..." >&2
+        fi
+    fi
+
+    if [ "$recreate_arx5_conda_env" -eq 1 ]; then
 
     echo "Creating conda environment for ARX5 C++ build deps..."
 
@@ -2183,6 +2211,7 @@ install_arx_x5_dual_env() {
     "$arx5_conda_env/bin/python" -m pip install atomics \
         || { echo "atomics installation failed" >&2; exit 1; }
     fi
+    echo "Using ARX5 Conda Python: $(realpath "$arx5_conda_env/bin/python") ($($arx5_conda_env/bin/python -c 'import platform; print(platform.python_version())'))"
     local conda_prefix="$arx5_conda_env"
     export CONDA_PREFIX="$conda_prefix"
 

@@ -92,7 +92,8 @@ class ArxX5DualInputs(transforms.DataTransformFn):
 
     Args:
         action_dim: π0.5 内部动作维度。OpenPI 通常会使用比真实机器人更大的
-           统一维度，因此状态和训练动作会在尾部补零到这个长度。
+           统一维度，训练动作会在尾部补零到这个长度；状态保持 ARX 的 14 维，
+           由后续模型输入流程负责自动补维。
         model_type: OpenPI 模型类型。当前注册配置传入 ``PI05``。
 
     Effects:
@@ -126,7 +127,9 @@ class ArxX5DualInputs(transforms.DataTransformFn):
         head, left_wrist, right_wrist = _extract_three_views(data)
 
         inputs = {
-            "state": transforms.pad_to_dim(state, self.action_dim),
+            # OpenPI 后续输入流程会根据模型需要自动补齐 state 维度。这里必须
+            # 保留 ARX 原始的 14 维，避免重复补维。
+            "state": state,
             "image": {
                 "base_0_rgb": head,
                 "left_wrist_0_rgb": left_wrist,
