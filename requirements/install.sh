@@ -10,6 +10,8 @@ VENV_DIR=".venv"
 PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
 ARX5_SDK_COMMIT="a1188874d5a50aa61dec4f0b8fec6af77638b390"
+OPENPI_REPO_URL="${OPENPI_REPO_URL:-https://github.com/Vertax42/xense-openpi}"
+OPENPI_PYTHON_VERSION="${OPENPI_PYTHON_VERSION:-3.12.14}"
 TORCH_VERSION=""
 SGLANG_VERSION=""
 TRANSFORMERS_VERSION=""
@@ -1254,12 +1256,21 @@ install_openvla_oft_model() {
 }
 
 install_openpi_model() {
+    # xense-openpi requires Python >= 3.12 because it depends on
+    # transformers>=5.3.0. This overrides the default 3.11.14 and the
+    # behavior env's 3.10 pin for all OpenPI model flows.
+    #
+    # WARNING: the behavior environment historically pins Python 3.10 and
+    # several old wheels (numba 0.65.1, protobuf 3.20.3, torch 2.5.1). Running
+    # it under Python 3.12 has not been validated and may fail. If you only
+    # need xense-openpi for arx_x5_dual / franka / polaris etc., this is fine.
+    PYTHON_VERSION="$OPENPI_PYTHON_VERSION"
+
     case "$ENV_NAME" in
         behavior)
-            PYTHON_VERSION="3.10"
             create_and_sync_venv
             install_common_embodied_deps
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_behavior_env
             uv pip install protobuf==6.33.0
             pushd ~ >/dev/null
@@ -1270,41 +1281,41 @@ install_openpi_model() {
             create_and_sync_venv
             install_common_embodied_deps
             install_${ENV_NAME}_env
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             ;;
         metaworld)
             create_and_sync_venv
             install_common_embodied_deps
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             install_metaworld_env
             ;;
         calvin)
             create_and_sync_venv
             install_common_embodied_deps
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             install_calvin_env
             ;;
         robocasa)
             create_and_sync_venv
             install_common_embodied_deps
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             install_robocasa_env
             ;;
         robotwin)
             create_and_sync_venv
             install_common_embodied_deps
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             install_robotwin_env
             ;;
         isaaclab)
             create_and_sync_venv
             install_common_embodied_deps
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_isaaclab_env
             # Torch is modified in Isaac Lab, install flash-attn afterwards
             install_flash_attn
@@ -1313,7 +1324,7 @@ install_openpi_model() {
         roboverse)
             create_and_sync_venv
             install_common_embodied_deps
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             install_roboverse_env
             ;;
@@ -1325,7 +1336,7 @@ install_openpi_model() {
                 bash $SCRIPT_DIR/embodied/franky_install.sh
             fi
             install_franka_franky_env
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             ;;
         arx_x5_dual)
@@ -1335,14 +1346,14 @@ install_openpi_model() {
             # 因此按顺序安装，并用 --inexact 保留前面已经装好的公共依赖。
             uv sync --extra arx_x5_dual --inexact --active $NO_INSTALL_RLINF_CMD
             install_arx_x5_dual_env
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             install_flash_attn
             ;;
         polaris)
             create_and_sync_venv
             install_common_embodied_deps
             install_polaris_env
-            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_xense_openpi
             ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
@@ -1354,15 +1365,24 @@ install_openpi_model() {
     # openpi/orbax require jax.experimental.layout.DeviceLocalLayout (removed in jax>=0.7.0).
     uv pip install -r "$SCRIPT_DIR/embodied/models/openpi.txt"
 
-    # Replace transformers models with OpenPI's modified versions
+    # xense-openpi uses transformers>=5.3.0 and keeps Pi0 deltas as HF subclasses
+    # under openpi/models_pytorch/transformers_compat/. The old transformers_replace
+    # source-tree patch only exists for the original RLinf/openpi (transformers 4.53.2).
+    # Conditionally copy so the install does not fail when the directory is absent.
     local py_major_minor
     py_major_minor=$(python - <<'EOF'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}")
 EOF
 )
-    cp -r "$VENV_DIR/lib/python${py_major_minor}/site-packages/openpi/models_pytorch/transformers_replace/"* \
-        "$VENV_DIR/lib/python${py_major_minor}/site-packages/transformers/"
+    local transformers_replace_dir="$VENV_DIR/lib/python${py_major_minor}/site-packages/openpi/models_pytorch/transformers_replace"
+    if [ -d "$transformers_replace_dir" ]; then
+        echo "[install_openpi_model] Patching transformers with openpi/transformers_replace..."
+        cp -r "$transformers_replace_dir/"* \
+            "$VENV_DIR/lib/python${py_major_minor}/site-packages/transformers/"
+    else
+        echo "[install_openpi_model] transformers_replace not found; skipping copy (expected for xense-openpi / transformers>=5.x)."
+    fi
 
     bash $SCRIPT_DIR/embodied/download_assets.sh --assets openpi
     uv pip uninstall pynvml || true
@@ -1641,6 +1661,38 @@ install_qwen3_vl_model() {
 install_lerobot() {
     env -u UV_TORCH_BACKEND uv pip install \
         "git+${GITHUB_PREFIX}https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
+}
+
+install_xense_openpi() {
+    # Clone and install the xense-openpi repo and its workspace package.
+    #
+    # xense-openpi (Vertax42/xense-openpi) is a fork of openpi that targets
+    # transformers>=5.3.0 and keeps the Pi0 deltas as HF subclasses under
+    # openpi/models_pytorch/transformers_compat/ instead of the old
+    # transformers_replace/ source-tree patch. It also ships a workspace
+    # package packages/xense-client that openpi depends on, so we must
+    # install both in editable mode.
+
+    local xense_openpi_dir
+    xense_openpi_dir=$(clone_or_reuse_repo XENSE_OPENPI_PATH \
+        "$VENV_DIR/xense-openpi" \
+        "${GITHUB_PREFIX}${OPENPI_REPO_URL}")
+
+    echo "Installing xense-openpi and xense-client workspace packages..."
+    uv pip install -e "$xense_openpi_dir"
+    uv pip install -e "$xense_openpi_dir/packages/xense-client"
+
+    # Smoke-test the key imports that RLinf's OpenPI wrapper needs. This catches
+    # workspace-package or transformers-version issues before the full install
+    # proceeds to flash-attn and asset downloads.
+    python - <<'PY'
+import openpi
+from openpi.models import model as _model
+from openpi.models.pi0_config import Pi0Config
+from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks
+from openpi.training.config import DataConfig, DataConfigFactory, ModelTransformFactory
+print("xense-openpi imports OK")
+PY
 }
 
 install_franka_realworld_env() {
