@@ -26,3 +26,6 @@ env:
       dry_run: true
       is_dummy: false
       max_num_steps: 5
+      start_position:
+        # 只允许这一次受保护的初始化移动；后续模型动作仍不会发送到机械臂。
+        move_in_hardware_dry_run: true

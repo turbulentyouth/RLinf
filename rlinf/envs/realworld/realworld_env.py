@@ -368,6 +368,11 @@ class RealWorldEnv(gym.Env):
             infos_list,
         )
 
+    def close(self) -> None:
+        """Close the vector environment and its underlying hardware envs."""
+
+        self.env.close()
+
     def _handle_auto_reset(self, dones, _final_obs, infos):
         final_obs = copy.deepcopy(_final_obs)
         env_idx = np.arange(0, self.num_envs)[dones]

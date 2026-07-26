@@ -21,6 +21,9 @@ from omegaconf.omegaconf import OmegaConf
 from rlinf.config import validate_cfg
 from rlinf.runners.embodied_eval_runner import EmbodiedEvalRunner
 from rlinf.scheduler import Cluster
+from rlinf.utils.ckpt_convertor.convert_openpi_jax_to_torch import (
+    prepare_openpi_checkpoint,
+)
 from rlinf.utils.placement import HybridComponentPlacement
 from rlinf.workers.env.env_worker import EnvWorker
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
@@ -35,6 +38,7 @@ mp.set_start_method("spawn", force=True)
 )
 def main(cfg) -> None:
     cfg.runner.task_type = "embodied_eval"
+    cfg = prepare_openpi_checkpoint(cfg)
     cfg = validate_cfg(cfg)
     print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
 

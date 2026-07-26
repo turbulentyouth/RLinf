@@ -28,5 +28,6 @@ env:
       head_camera_serial: null
       left_wrist_camera_serial: null
       right_wrist_camera_serial: null
-      task_description: "ARX distributed dry-run"
       max_num_steps: 5
+      start_position:
+        enabled: false

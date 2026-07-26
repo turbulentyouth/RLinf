@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 
 np = pytest.importorskip("numpy")
 pytest.importorskip("openpi")
+from openpi import transforms  # noqa: E402
 
 from rlinf.models.embodiment.openpi.policies.arx_x5_dual_policy import (  # noqa: E402
     ArxX5DualInputs,
@@ -56,6 +57,44 @@ def test_openpi_input_maps_head_and_two_wrist_cameras():
     assert result["prompt"] == "把物体放入盒中"
 
 
+def test_openpi_input_normalizes_before_padding_to_model_dimension():
+    """确认 14 维 ARX 统计量可在补到 32 维前完成归一化。"""
+
+    state = np.linspace(-0.5, 0.5, 14, dtype=np.float32)
+    actions = np.stack([state, state], axis=0)
+    stats = transforms.NormStats(
+        mean=np.zeros(14, dtype=np.float32),
+        std=np.ones(14, dtype=np.float32),
+        q01=-np.ones(14, dtype=np.float32),
+        q99=np.ones(14, dtype=np.float32),
+    )
+    transform = transforms.compose(
+        [
+            ArxX5DualInputs(action_dim=32),
+            transforms.Normalize(
+                {"state": stats, "actions": stats}, use_quantiles=True
+            ),
+            transforms.PadStatesAndActions(32),
+        ]
+    )
+
+    result = transform(
+        {
+            "observation/image": np.zeros((8, 10, 3), dtype=np.uint8),
+            "observation/extra_view_image": np.zeros((2, 8, 10, 3), dtype=np.uint8),
+            "observation/state": state,
+            "actions": actions,
+        }
+    )
+
+    assert result["state"].shape == (32,)
+    assert result["actions"].shape == (2, 32)
+    np.testing.assert_allclose(result["state"][:14], state, atol=1e-6)
+    np.testing.assert_array_equal(result["state"][14:], np.zeros(18))
+    np.testing.assert_allclose(result["actions"][:, :14], actions, atol=1e-6)
+    np.testing.assert_array_equal(result["actions"][:, 14:], np.zeros((2, 18)))
+
+
 def test_openpi_output_keeps_first_14_absolute_action_dimensions():
     """确认 π0.5 补齐维度会被移除，14 维绝对动作顺序保持不变。"""
 
@@ -73,17 +112,13 @@ def test_realworld_eval_config_is_rollout_only(monkeypatch):
     config_dir = repo_path / "evaluations" / "realworld"
     environment = {
         "EMBODIED_PATH": str(repo_path / "examples" / "embodiment"),
-        "ROBOT_RLINF_PYTHON": "/opt/rlinf/.venv/bin/python",
-        "ARX_PI05_CHECKPOINT": "/models/arx-pi05",
-        "ARX_NORM_STATS_PATH": "/models/arx-pi05/assets",
-        "ARX_SFT_REPO_ID": "arx/sft",
         "ARX_HEAD_CAMERA_SERIAL": "head",
         "ARX_LEFT_CAMERA_SERIAL": "left",
         "ARX_RIGHT_CAMERA_SERIAL": "right",
-        "ARX_TASK_DESCRIPTION": "pick up the object",
     }
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("ARX_PI05_JAX_CHECKPOINT", raising=False)
 
     with initialize_config_dir(version_base="1.1", config_dir=str(config_dir)):
         cfg = compose(config_name="realworld_eval_arx_x5_dual_pi05")
@@ -91,6 +126,8 @@ def test_realworld_eval_config_is_rollout_only(monkeypatch):
 
     assert cfg.runner.task_type == "embodied_eval"
     assert cfg.runner.only_eval is True
+    assert cfg.runner.continuous_eval.enabled is True
+    assert cfg.runner.continuous_eval.max_cycles is None
     assert "actor" not in cfg
     assert "critic" not in cfg
     assert "reward" not in cfg
@@ -99,6 +136,35 @@ def test_realworld_eval_config_is_rollout_only(monkeypatch):
     assert cfg.rollout.model.model_type == "openpi"
     assert cfg.rollout.model.openpi.num_images_in_input == 3
     assert cfg.rollout.model.action_dim == 14
+    assert cfg.rollout.model.model_path == "/home/li/hubo/RLinf/30000_torch"
+    assert cfg.checkpoint_conversion.checkpoint_path == (
+        "/home/li/hubo/RLinf/30000_torch"
+    )
+    assert cfg.checkpoint_conversion.converted_checkpoint_dir is None
+    assert cfg.checkpoint_conversion.config_name == "pi05_arx_x5_dual"
+    assert cfg.rollout.model.openpi_data.repo_id == "Xense/stack_cubes_0722"
+    assert cfg.rollout.model.openpi_data.norm_stats_path == (
+        "/home/li/hubo/RLinf/30000/assets/Xense/stack_cubes_0722"
+    )
+    assert cfg.cluster.node_groups[1].env_configs[0].python_interpreter_path == (
+        "/home/xi/Downloads/RLinf/.venv/bin/python3"
+    )
+    assert cfg.env.eval.override_cfg.task_description == (
+        "centre the blue cube, stack green cube on top of the blue cube, "
+        "stack yellow cube on top of the green cube, stack red cube on top "
+        "of the yellow cube."
+    )
+    assert cfg.env.eval.max_steps_per_rollout_epoch == 5
+    assert cfg.env.eval.override_cfg.start_position.enabled is True
+    assert cfg.env.eval.override_cfg.start_position.move_in_hardware_dry_run is False
+    assert cfg.env.eval.override_cfg.start_position.left_joints == [
+        0.0,
+        0.948,
+        0.858,
+        -0.573,
+        0.0,
+        0.0,
+    ]
     assert cfg.cluster.component_placement.rollout.node_group == "inference"
     assert cfg.cluster.component_placement.env.node_group == "robot"
 
@@ -117,25 +183,20 @@ def test_two_machine_dry_run_configs(monkeypatch, config_name, expected_mode):
     config_dir = repo_path / "evaluations" / "realworld"
     common_environment = {
         "EMBODIED_PATH": str(repo_path / "examples" / "embodiment"),
-        "ROBOT_RLINF_PYTHON": "/opt/rlinf/.venv/bin/python",
-        "ARX_PI05_CHECKPOINT": "/models/arx-pi05",
-        "ARX_NORM_STATS_PATH": "/models/arx-pi05/assets",
-        "ARX_SFT_REPO_ID": "arx/sft",
     }
     for key, value in common_environment.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("ARX_PI05_JAX_CHECKPOINT", raising=False)
 
     if expected_mode == "hardware":
         monkeypatch.setenv("ARX_HEAD_CAMERA_SERIAL", "head")
         monkeypatch.setenv("ARX_LEFT_CAMERA_SERIAL", "left")
         monkeypatch.setenv("ARX_RIGHT_CAMERA_SERIAL", "right")
-        monkeypatch.setenv("ARX_TASK_DESCRIPTION", "pick up the object")
     else:
         for key in (
             "ARX_HEAD_CAMERA_SERIAL",
             "ARX_LEFT_CAMERA_SERIAL",
             "ARX_RIGHT_CAMERA_SERIAL",
-            "ARX_TASK_DESCRIPTION",
         ):
             monkeypatch.delenv(key, raising=False)
 
@@ -148,6 +209,12 @@ def test_two_machine_dry_run_configs(monkeypatch, config_name, expected_mode):
     assert cfg.env.eval.max_steps_per_rollout_epoch == 5
     assert cfg.env.eval.override_cfg.dry_run is (expected_mode == "hardware")
     assert cfg.env.eval.override_cfg.is_dummy is (expected_mode == "distributed")
+    assert cfg.env.eval.override_cfg.task_description.startswith("centre the blue cube")
+    assert cfg.runner.continuous_eval.enabled is True
+    if expected_mode == "hardware":
+        assert cfg.env.eval.override_cfg.start_position.move_in_hardware_dry_run is True
+    else:
+        assert cfg.env.eval.override_cfg.start_position.enabled is False
     if expected_mode == "distributed":
         assert cfg.env.eval.override_cfg.head_camera_serial is None
         assert cfg.env.eval.override_cfg.left_wrist_camera_serial is None

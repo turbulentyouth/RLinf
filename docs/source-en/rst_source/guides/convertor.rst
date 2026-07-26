@@ -1,7 +1,45 @@
 Checkpoint Convertor
 =====================
 
-RLinf provides Megatron-LM and FSDP checkpoint convertor scripts, supporting converting from ``.distcp`` or ``.pt`` format checkpoint files to ``.safetensors`` format.
+RLinf provides OpenPI, Megatron-LM, and FSDP checkpoint convertor scripts. They support OpenPI JAX-to-PyTorch conversion and conversion from ``.distcp`` or ``.pt`` checkpoint files to ``.safetensors`` format.
+
+OpenPI JAX-to-PyTorch Convertor
+-------------------------------
+
+The OpenPI preparation step can read its input path, optional output path,
+OpenPI config name, and precision from an RLinf evaluation YAML. For example,
+the ARX X5 dual-arm evaluation config defines:
+
+.. code-block:: yaml
+
+   checkpoint_conversion:
+     checkpoint_path: ${oc.env:ARX_PI05_CHECKPOINT}
+     converted_checkpoint_dir: ${oc.env:ARX_PI05_TORCH_CHECKPOINT,null}
+     config_name: ${rollout.model.openpi.config_name}
+     precision: "bfloat16"
+
+   rollout:
+     model:
+       model_path: ${checkpoint_conversion.checkpoint_path}
+
+The evaluation entrypoint detects the format before Ray workers are created:
+
+* A PyTorch checkpoint is loaded directly.
+* A JAX Orbax checkpoint is converted to PyTorch automatically.
+* A complete converted output is reused on later launches.
+
+Set ``ARX_PI05_CHECKPOINT`` to either a JAX or PyTorch checkpoint. Optionally
+set ``ARX_PI05_TORCH_CHECKPOINT`` to choose the JAX conversion output directory;
+otherwise ``<ARX_PI05_CHECKPOINT>_torch`` is used. To prepare the checkpoint
+without starting evaluation, run:
+
+.. code-block:: bash
+
+   export ARX_PI05_CHECKPOINT=/path/to/jax/checkpoint/30000
+   python -m rlinf.utils.ckpt_convertor.convert_openpi_jax_to_torch \
+       --config-path evaluations/realworld/realworld_eval_arx_x5_dual_pi05.yaml
+
+Evaluation uses the final PyTorch directory as ``rollout.model.model_path``.
 
 FSDP Convertor Script
 ----------------------
@@ -154,4 +192,3 @@ Run the following commands directly. Set:
     rm -f "${CKPT_PATH_HF}"/*.done
     shopt -s extglob
     cp "${CKPT_PATH_ORIGINAL_HF}"/!(*model.safetensors.index).json "${CKPT_PATH_HF}"
-

@@ -84,7 +84,20 @@ override_cfg:
   max_num_steps: 300
   task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
   skip_interface_check: false
-  # hardware dry-run 会连接 CAN 和相机、读取真实观测，但不启用位置控制，也不发送动作。
+  # 默认不自动移动。评测主配置可启用一次 start position 初始化移动。
+  start_position:
+    enabled: false
+    move_in_hardware_dry_run: false
+    left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+    right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+    left_gripper: null
+    right_gripper: null
+    duration: 30.0
+    control_frequency: 50.0
+    max_joint_delta: 1.2
+    max_final_error: 0.15
+    max_control_lag: 0.25
+  # hardware dry-run 默认不发送动作；可单独允许上述一次初始化移动。
   dry_run: false
   # distributed dry-run 使用 is_dummy=true，不要求连接机械臂、CAN 或相机。
   is_dummy: false

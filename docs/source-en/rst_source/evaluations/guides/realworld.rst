@@ -78,6 +78,9 @@ The following examples live under ``evaluations/realworld/``:
    * - ``realworld_eval.yaml``
      - Custom task (``FrankaEnv-v1``)
      - π₀
+   * - ``realworld_eval_arx_x5_dual_pi05.yaml``
+     - ARX X5 dual-arm block stacking
+     - π₀.₅
 
 If ``evaluations/realworld/<config>.yaml`` is missing, ``run_eval.sh`` falls back to the same name under ``examples/embodiment/config/`` (set ``runner.task_type: embodied_eval`` and ``runner.only_eval: True``). See :doc:`../reference/cli`.
 Dual Franka deployment currently uses this fallback path with ``realworld_eval_dual_franka``.
@@ -349,6 +352,42 @@ Set ``rollout.model.model_path`` to the staged checkpoint directory and
 
 For the full collection, SFT, checkpoint staging, and pedal-control workflow,
 see :doc:`../../examples/embodied/dual_franka`.
+
+ARX X5 Dual-Arm Continuous Inference
+------------------------------------
+
+``realworld_eval_arx_x5_dual_pi05.yaml`` uses the shared configuration
+``_realworld_eval_arx_x5_dual_pi05_common.yaml``. Its behavior is controlled
+entirely by YAML settings:
+
+.. code-block:: yaml
+
+   runner:
+     continuous_eval:
+       enabled: true
+       max_cycles: null  # continue until Ctrl+C
+
+   env:
+     eval:
+       max_steps_per_rollout_epoch: 5
+       override_cfg:
+         start_position:
+           enabled: true
+           move_in_hardware_dry_run: false
+           left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+           right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+           duration: 30.0
+
+The start-position motion runs only before the first model inference. Later
+continuous cycles keep the current robot state and do not return to the start
+position. The hardware dry-run config sets
+``move_in_hardware_dry_run: true``: this permits only the guarded initial
+motion, returns both arms to damping mode, and still suppresses every model
+action. The distributed dry-run disables start-position motion.
+
+Press ``Ctrl+C`` to stop continuous inference. RLinf waits for the current
+five-step cycle to finish, closes the real-world environment, and returns the
+ARX controllers to damping/passive mode.
 
 Viewing Results
 ---------------

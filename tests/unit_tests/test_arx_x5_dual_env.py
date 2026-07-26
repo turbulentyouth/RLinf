@@ -223,8 +223,13 @@ class _FakeEnvController:
         self.joint_position_high = np.full(6, 2.0, dtype=np.float64)
         self.gripper_position_low = 0.0
         self.gripper_position_high = 0.088
+        self.joint_velocity_limit = np.ones(6, dtype=np.float64)
+        self.gripper_velocity_limit = 0.5
         self.position_control_calls = 0
         self.sent_actions = []
+        self.joint_position = np.zeros(6, dtype=np.float64)
+        self.gripper_position = 0.0
+        self.damping_calls = 0
         self.closed = False
         self.__class__.instances.append(self)
 
@@ -234,15 +239,17 @@ class _FakeEnvController:
 
     def read_state(self):
         return SimpleNamespace(
-            joint_position=np.zeros(6, dtype=np.float64),
-            gripper_position=0.0,
+            joint_position=self.joint_position.copy(),
+            gripper_position=self.gripper_position,
         )
 
     def send_absolute_joint_position(self, joint_position, gripper_position):
         self.sent_actions.append((joint_position.copy(), gripper_position))
+        self.joint_position = joint_position.copy()
+        self.gripper_position = gripper_position
 
     def set_to_damping(self):
-        pass
+        self.damping_calls += 1
 
     def close(self):
         self.closed = True
@@ -454,6 +461,64 @@ def test_hardware_dry_run_reads_devices_without_sending_actions(monkeypatch):
 
     env.close()
     assert all(controller.closed for controller in _FakeEnvController.instances)
+
+
+def test_hardware_dry_run_moves_to_start_once_then_suppresses_actions(monkeypatch):
+    """允许 hardware dry-run 初始化移动，但禁止后续模型动作下发。"""
+
+    _, ArxX5DualEnv = _import_arx_classes(monkeypatch)
+    from rlinf.envs.realworld.arx_x5_dual import arx_x5_dual_env as env_module
+
+    _FakeEnvController.instances.clear()
+    monkeypatch.setattr(env_module, "ArxX5JointController", _FakeEnvController)
+    monkeypatch.setattr(env_module.time, "sleep", lambda _: None)
+
+    def _open_fake_cameras(instance):
+        instance._cameras = [
+            _FakeCamera("base_0_rgb", (10, 20, 30)),
+            _FakeCamera("left_wrist_0_rgb", (40, 50, 60)),
+            _FakeCamera("right_wrist_0_rgb", (70, 80, 90)),
+        ]
+
+    monkeypatch.setattr(ArxX5DualEnv, "_open_cameras", _open_fake_cameras)
+    env = ArxX5DualEnv(
+        override_cfg={
+            "dry_run": True,
+            "skip_interface_check": True,
+            "head_camera_serial": "head",
+            "left_wrist_camera_serial": "left",
+            "right_wrist_camera_serial": "right",
+            "controller_warmup_time": 0.0,
+            "step_frequency": 1_000_000.0,
+            "image_height": 4,
+            "image_width": 4,
+            "start_position": {
+                "enabled": True,
+                "move_in_hardware_dry_run": True,
+                "left_joints": [0.1] * 6,
+                "right_joints": [-0.1] * 6,
+                "duration": 1.0,
+                "control_frequency": 2.0,
+                "max_joint_delta": 0.2,
+                "max_final_error": 1e-6,
+            },
+        }
+    )
+
+    env.reset()
+    controllers = _FakeEnvController.instances
+    assert all(controller.position_control_calls == 1 for controller in controllers)
+    assert all(len(controller.sent_actions) == 2 for controller in controllers)
+    assert all(controller.damping_calls >= 1 for controller in controllers)
+    np.testing.assert_allclose(controllers[0].joint_position, np.full(6, 0.1))
+    np.testing.assert_allclose(controllers[1].joint_position, np.full(6, -0.1))
+
+    sent_counts = [len(controller.sent_actions) for controller in controllers]
+    env.reset()
+    env.step(np.zeros(14, dtype=np.float64))
+    assert [len(controller.sent_actions) for controller in controllers] == sent_counts
+
+    env.close()
 
 
 def test_dry_run_and_dummy_modes_are_mutually_exclusive(monkeypatch):
