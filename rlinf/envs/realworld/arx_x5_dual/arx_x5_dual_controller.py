@@ -40,7 +40,9 @@ def _ensure_ament_prefix_path() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     arx5_prefix = str(repo_root / ".venv" / "arx5-conda-env")
     entries = [
-        path for path in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep) if path
+        path
+        for path in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep)
+        if path
     ]
     if arx5_prefix not in entries:
         os.environ["AMENT_PREFIX_PATH"] = os.pathsep.join([arx5_prefix, *entries])
@@ -107,8 +109,7 @@ class ArxX5JointController:
         vector = np.asarray(value, dtype=np.float64).reshape(-1).copy()
         if vector.shape != (expected_dim,):
             raise RuntimeError(
-                f"ARX SDK 字段 {name!r} 应为 ({expected_dim},)，"
-                f"实际为 {vector.shape}。"
+                f"ARX SDK 字段 {name!r} 应为 ({expected_dim},)，实际为 {vector.shape}。"
             )
         if not np.all(np.isfinite(vector)):
             raise RuntimeError(f"ARX SDK 字段 {name!r} 包含 NaN 或 Inf。")
@@ -174,7 +175,9 @@ class ArxX5JointController:
             interface_name,
         )
 
-    def enable_position_control(self, kp_scale: float = 0.5, kd_scale: float = 1.5) -> None:
+    def enable_position_control(
+        self, kp_scale: float = 0.5, kd_scale: float = 1.5
+    ) -> None:
         """按参考流程启用位置控制。
 
         与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持一致：
@@ -210,7 +213,12 @@ class ArxX5JointController:
             )[0]
         )
         self._controller.set_joint_cmd(command)
-        time.sleep(max(self._controller_config.default_preview_time, self._controller_config.controller_dt * 2))
+        time.sleep(
+            max(
+                self._controller_config.default_preview_time,
+                self._controller_config.controller_dt * 2,
+            )
+        )
 
         config = self._controller.get_controller_config()
         gain = self._arx5.Gain(self.JOINT_DOF)
@@ -247,6 +255,18 @@ class ArxX5JointController:
         """返回绝对夹爪命令的最大值，也就是机械臂配置中的夹爪宽度。"""
 
         return float(self._robot_config.gripper_width)
+
+    @property
+    def joint_velocity_limit(self) -> np.ndarray:
+        """返回已经应用安全缩放后的六关节速度上限。"""
+
+        return np.asarray(self._robot_config.joint_vel_max, dtype=np.float64).copy()
+
+    @property
+    def gripper_velocity_limit(self) -> float:
+        """返回 SDK 配置中的夹爪速度上限。"""
+
+        return float(self._robot_config.gripper_vel_max)
 
     def read_state(self) -> ArxX5ArmState:
         """读取当前关节、夹爪和末端位姿反馈。
@@ -297,9 +317,7 @@ class ArxX5JointController:
             gripper_position=gripper_position,
             gripper_velocity=gripper_velocity,
             gripper_torque=gripper_torque,
-            eef_pose_6d=self._copy_finite_vector(
-                "eef_pose_6d", eef_state.pose_6d(), 6
-            ),
+            eef_pose_6d=self._copy_finite_vector("eef_pose_6d", eef_state.pose_6d(), 6),
         )
 
     def send_absolute_joint_position(
@@ -334,9 +352,7 @@ class ArxX5JointController:
                 f"joint_position 必须是 ({self.JOINT_DOF},)，"
                 f"实际收到 {joint_position.shape}。"
             )
-        if not np.all(np.isfinite(joint_position)) or not np.isfinite(
-            gripper_position
-        ):
+        if not np.all(np.isfinite(joint_position)) or not np.isfinite(gripper_position):
             raise ValueError("绝对关节命令不能包含 NaN 或 Inf。")
 
         low = self.joint_position_low
@@ -347,9 +363,7 @@ class ArxX5JointController:
                 f"command={joint_position}, low={low}, high={high}。"
             )
         if not (
-            self.gripper_position_low
-            <= gripper_position
-            <= self.gripper_position_high
+            self.gripper_position_low <= gripper_position <= self.gripper_position_high
         ):
             raise ValueError(
                 "绝对夹爪命令超出范围："

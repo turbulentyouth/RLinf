@@ -1347,6 +1347,22 @@ class EnvWorker(Worker):
 
         return eval_metrics
 
+    def close_envs(self) -> None:
+        """Close all initialized train/eval environments on this worker."""
+
+        closed_env_ids = set()
+        for env in [*self.env_list, *self.eval_env_list]:
+            if id(env) in closed_env_ids:
+                continue
+            closed_env_ids.add(id(env))
+            close = get_env_attr(env, "close")
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception as exc:
+                self.log_warning(f"Failed to close environment cleanly: {exc}")
+
     def get_actor_split_num(self):
         send_num = self._component_placement.get_world_size("env") * self.stage_num
         recv_num = self._component_placement.get_world_size("actor")

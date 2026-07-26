@@ -1,7 +1,43 @@
 Checkpoint 转换
 =================
 
-RLinf提供Megatron-LM和FSDP checkpoint转换脚本，支持从 ``.distcp`` 或 ``.pt`` 格式的checkpoint文件转换到 ``.safetensors`` 格式。
+RLinf 提供 OpenPI、Megatron-LM 和 FSDP checkpoint 转换脚本，支持 OpenPI JAX 到 PyTorch 的转换，以及从 ``.distcp`` 或 ``.pt`` checkpoint 文件转换到 ``.safetensors`` 格式。
+
+OpenPI JAX 到 PyTorch 转换
+---------------------------
+
+OpenPI 准备流程可以从 RLinf 评测 YAML 中读取输入路径、可选输出路径、OpenPI
+配置名和精度。例如，ARX X5 双臂评测配置包含：
+
+.. code-block:: yaml
+
+   checkpoint_conversion:
+     checkpoint_path: ${oc.env:ARX_PI05_CHECKPOINT}
+     converted_checkpoint_dir: ${oc.env:ARX_PI05_TORCH_CHECKPOINT,null}
+     config_name: ${rollout.model.openpi.config_name}
+     precision: "bfloat16"
+
+   rollout:
+     model:
+       model_path: ${checkpoint_conversion.checkpoint_path}
+
+评测入口会在创建 Ray workers 前自动检测格式：
+
+* PyTorch checkpoint 直接加载；
+* JAX Orbax checkpoint 自动转换为 PyTorch；
+* 已存在完整的转换产物时直接复用。
+
+将 ``ARX_PI05_CHECKPOINT`` 设置为 JAX 或 PyTorch checkpoint。可选地设置
+``ARX_PI05_TORCH_CHECKPOINT`` 指定 JAX 转换输出目录；未设置时默认使用
+``<ARX_PI05_CHECKPOINT>_torch``。如果只想准备 checkpoint 而不启动评测，可执行：
+
+.. code-block:: bash
+
+   export ARX_PI05_CHECKPOINT=/path/to/jax/checkpoint/30000
+   python -m rlinf.utils.ckpt_convertor.convert_openpi_jax_to_torch \
+       --config-path evaluations/realworld/realworld_eval_arx_x5_dual_pi05.yaml
+
+评测最终会把 PyTorch checkpoint 目录作为 ``rollout.model.model_path``。
 
 FSDP 转换脚本
 ----------------------

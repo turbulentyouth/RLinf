@@ -68,18 +68,55 @@ class EmbodiedEvalRunner:
             input_channel=self.rollout_channel,
             output_channel=self.env_channel,
         )
-        env_results = env_handle.wait()
         env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
-        if not env_decoupled_mode:
-            rollout_handle.wait()
+        try:
+            env_results = env_handle.wait()
+            if not env_decoupled_mode:
+                rollout_handle.wait()
+        except KeyboardInterrupt:
+            self.logger.info(
+                "Manual stop requested; waiting for the current short evaluation "
+                "cycle to finish before closing the environments."
+            )
+            env_handle.wait()
+            if not env_decoupled_mode:
+                rollout_handle.wait()
+            raise
         eval_metrics_list = [results for results in env_results if results is not None]
         eval_metrics = compute_evaluate_metrics(eval_metrics_list)
         return eval_metrics
 
     def run(self):
-        eval_metrics = self.evaluate()
-        eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
-        self.logger.info(eval_metrics)
-        self.metric_logger.log(step=0, data=eval_metrics)
+        continuous_cfg = self.cfg.runner.get("continuous_eval", {})
+        continuous_enabled = bool(continuous_cfg.get("enabled", False))
+        max_cycles = continuous_cfg.get("max_cycles", None)
+        if max_cycles is not None and int(max_cycles) <= 0:
+            raise ValueError(
+                "runner.continuous_eval.max_cycles must be positive or null."
+            )
 
-        self.metric_logger.finish()
+        cycle = 0
+        try:
+            while True:
+                eval_metrics = self.evaluate()
+                eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                self.logger.info("Evaluation cycle %d metrics: %s", cycle, eval_metrics)
+                self.metric_logger.log(step=cycle, data=eval_metrics)
+                cycle += 1
+
+                if not continuous_enabled:
+                    break
+                if max_cycles is not None and cycle >= int(max_cycles):
+                    break
+        except KeyboardInterrupt:
+            self.logger.info(
+                "Continuous inference stopped manually after %d completed cycles.",
+                cycle,
+            )
+        finally:
+            try:
+                close_handle = self.env.close_envs()
+                close_handle.wait()
+            except Exception as exc:
+                self.logger.warning("Failed to close evaluation environments: %s", exc)
+            self.metric_logger.finish()

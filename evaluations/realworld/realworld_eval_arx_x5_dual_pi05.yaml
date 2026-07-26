@@ -3,12 +3,8 @@
 # 节点 0（GPU 服务器）：运行 eval 入口和 rollout，仅负责模型推理。
 # 节点 1（机器人电脑）：读取真实相机/关节状态并向机械臂下发动作。
 #
-# 启动前至少设置：
-#   ROBOT_RLINF_PYTHON   机器人电脑上的 RLinf Python 绝对路径
-#   ARX_PI05_CHECKPOINT  微调后的 pi0.5 checkpoint 目录
-#   ARX_NORM_STATS_PATH  包含 norm_stats.json 的目录
-#   ARX_SFT_REPO_ID      生成归一化统计时使用的数据集 repo_id
-#   ARX_*_CAMERA_SERIAL  三路 RealSense 序列号
+# 机器人 Python、PyTorch checkpoint、norm stats 和数据集 repo_id 已固定在
+# 共用配置中。正式推理仍需通过 ARX_*_CAMERA_SERIAL 设置三路 RealSense 序列号。
 
 defaults:
   - _realworld_eval_arx_x5_dual_pi05_common

@@ -78,6 +78,9 @@ Ray 集群的完整搭建、固件版本与 libfranka 兼容性见 :doc:`../../e
    * - ``realworld_eval.yaml``
      - 自定义任务（``FrankaEnv-v1``）
      - π₀
+   * - ``realworld_eval_arx_x5_dual_pi05.yaml``
+     - ARX X5 双臂积木堆叠
+     - π₀.₅
 
 若 ``evaluations/realworld/<config>.yaml`` 不存在，``run_eval.sh`` 会回退到 ``examples/embodiment/config/`` 下同名配置（需设置 ``runner.task_type: embodied_eval`` 与 ``runner.only_eval: True``）。详见 :doc:`../reference/cli`。
 Dual Franka 部署目前通过该回退路径使用 ``realworld_eval_dual_franka``。
@@ -347,6 +350,39 @@ Dual Franka SFT 部署复用统一评测启动器，并通过配置回退使用
        env.eval.override_cfg.task_description="handover the object"
 
 完整采集、SFT、checkpoint 同步与脚踏按键流程见 :doc:`../../examples/embodied/dual_franka`。
+
+ARX X5 双臂持续推理
+-------------------
+
+``realworld_eval_arx_x5_dual_pi05.yaml`` 复用共享配置
+``_realworld_eval_arx_x5_dual_pi05_common.yaml``，运行行为全部由 YAML 控制：
+
+.. code-block:: yaml
+
+   runner:
+     continuous_eval:
+       enabled: true
+       max_cycles: null  # 持续运行，直到 Ctrl+C
+
+   env:
+     eval:
+       max_steps_per_rollout_epoch: 5
+       override_cfg:
+         start_position:
+           enabled: true
+           move_in_hardware_dry_run: false
+           left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+           right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+           duration: 30.0
+
+start position 只在第一次模型推理前移动一次。后续持续推理周期保留机械臂
+当前位置，不会反复返回起始位。hardware dry-run 配置将
+``move_in_hardware_dry_run`` 设为 ``true``：只允许这一次受保护的初始化移动，
+随后双臂恢复阻尼模式，所有模型动作仍被禁止下发。distributed dry-run 则关闭
+start position 移动。
+
+按 ``Ctrl+C`` 可停止持续推理。RLinf 会等待当前五步短周期完成，关闭真机环境，
+并让 ARX 控制器进入阻尼/被动模式。
 
 查看结果
 --------
