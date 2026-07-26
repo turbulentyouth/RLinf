@@ -10,9 +10,9 @@ VENV_DIR=".venv"
 PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
 ARX5_SDK_COMMIT="a1188874d5a50aa61dec4f0b8fec6af77638b390"
-OPENPI_REPO_URL="${OPENPI_REPO_URL:-https://github.com/turbulentyouth/xense-openpi}"
-OPENPI_COMMIT="${OPENPI_COMMIT:-37d49f0b2f3d78e64cbcc7531853dcd6f7f1fcee}"
-OPENPI_PYTHON_VERSION="${OPENPI_PYTHON_VERSION:-3.12}"
+XENSE_OPENPI_REPO_URL="${XENSE_OPENPI_REPO_URL:-https://github.com/turbulentyouth/xense-openpi}"
+XENSE_OPENPI_COMMIT="${XENSE_OPENPI_COMMIT:-37d49f0b2f3d78e64cbcc7531853dcd6f7f1fcee}"
+XENSE_OPENPI_PYTHON_VERSION="${XENSE_OPENPI_PYTHON_VERSION:-3.12.12}"
 TORCH_VERSION=""
 SGLANG_VERSION=""
 TRANSFORMERS_VERSION=""
@@ -879,23 +879,30 @@ unset_mirror() {
 }
 
 create_and_sync_venv() {
-    local required_python_mm
-    required_python_mm="$(echo "$PYTHON_VERSION" | awk -F. '{print $1"."$2}')"
+    local required_python_parts
+    required_python_parts="$(awk -F. '{print NF}' <<< "$PYTHON_VERSION")"
 
     if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/activate" ]; then
         echo "Found existing venv at $VENV_DIR; validating Python version compatibility..."
         # shellcheck disable=SC1090
         source "$VENV_DIR/bin/activate"
 
-        local active_python_mm
-        active_python_mm="$(python - <<'EOF'
+        local active_python_version
+        active_python_version="$(python - <<'EOF'
 import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}")
+print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
 EOF
 )"
 
-        if [ "$active_python_mm" != "$required_python_mm" ]; then
-            echo "Venv Python version mismatch: required ${required_python_mm}.x (from PYTHON_VERSION=${PYTHON_VERSION}), found ${active_python_mm}.x. Recreating venv..." >&2
+        local python_version_matches=0
+        if [ "$required_python_parts" -eq 3 ] && [ "$active_python_version" = "$PYTHON_VERSION" ]; then
+            python_version_matches=1
+        elif [ "$required_python_parts" -eq 2 ] && [[ "$active_python_version" = "$PYTHON_VERSION".* ]]; then
+            python_version_matches=1
+        fi
+
+        if [ "$python_version_matches" -ne 1 ]; then
+            echo "Venv Python version mismatch: required ${PYTHON_VERSION}, found ${active_python_version}. Recreating venv..." >&2
             deactivate || true
             rm -rf "$VENV_DIR"
 
@@ -905,7 +912,7 @@ EOF
             # shellcheck disable=SC1090
             source "$VENV_DIR/bin/activate"
         else
-            echo "Reusing existing venv at $VENV_DIR"
+            echo "Reusing existing venv at $VENV_DIR (Python ${active_python_version})"
             install_uv
         fi
     else
@@ -915,6 +922,9 @@ EOF
         # shellcheck disable=SC1090
         source "$VENV_DIR/bin/activate"
     fi
+    local resolved_python_version
+    resolved_python_version="$(python -c 'import platform; print(platform.python_version())')"
+    echo "Using venv Python: $(realpath "$VENV_DIR/bin/python") (${resolved_python_version})"
     uv sync --active $NO_INSTALL_RLINF_CMD
 }
 
@@ -1270,21 +1280,12 @@ install_openvla_oft_model() {
 }
 
 install_openpi_model() {
-    # xense-openpi requires Python >= 3.12 because it depends on
-    # transformers>=5.3.0. This overrides the default 3.11.14 and the
-    # behavior env's 3.10 pin for all OpenPI model flows.
-    #
-    # WARNING: the behavior environment historically pins Python 3.10 and
-    # several old wheels (numba 0.65.1, protobuf 3.20.3, torch 2.5.1). Running
-    # it under Python 3.12 has not been validated and may fail. If you only
-    # need xense-openpi for arx_x5_dual / franka / polaris etc., this is fine.
-    PYTHON_VERSION="$OPENPI_PYTHON_VERSION"
-
     case "$ENV_NAME" in
         behavior)
+            PYTHON_VERSION="3.10"
             create_and_sync_venv
             install_common_embodied_deps
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_behavior_env
             uv pip install protobuf==6.33.0
             pushd ~ >/dev/null
@@ -1295,41 +1296,41 @@ install_openpi_model() {
             create_and_sync_venv
             install_common_embodied_deps
             install_${ENV_NAME}_env
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             ;;
         metaworld)
             create_and_sync_venv
             install_common_embodied_deps
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             install_metaworld_env
             ;;
         calvin)
             create_and_sync_venv
             install_common_embodied_deps
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             install_calvin_env
             ;;
         robocasa)
             create_and_sync_venv
             install_common_embodied_deps
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             install_robocasa_env
             ;;
         robotwin)
             create_and_sync_venv
             install_common_embodied_deps
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             install_robotwin_env
             ;;
         isaaclab)
             create_and_sync_venv
             install_common_embodied_deps
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_isaaclab_env
             # Torch is modified in Isaac Lab, install flash-attn afterwards
             install_flash_attn
@@ -1338,7 +1339,7 @@ install_openpi_model() {
         roboverse)
             create_and_sync_venv
             install_common_embodied_deps
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             install_roboverse_env
             ;;
@@ -1350,10 +1351,11 @@ install_openpi_model() {
                 bash $SCRIPT_DIR/embodied/franky_install.sh
             fi
             install_franka_franky_env
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
             ;;
         arx_x5_dual)
+            PYTHON_VERSION="$XENSE_OPENPI_PYTHON_VERSION"
             create_and_sync_venv
             install_common_embodied_runtime_deps
             # Remove simulator roots left by an older reused environment. They
@@ -1377,7 +1379,7 @@ install_openpi_model() {
             create_and_sync_venv
             install_common_embodied_deps
             install_polaris_env
-            install_xense_openpi
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
@@ -1389,10 +1391,6 @@ install_openpi_model() {
     # openpi/orbax require jax.experimental.layout.DeviceLocalLayout (removed in jax>=0.7.0).
     uv pip install -r "$SCRIPT_DIR/embodied/models/openpi.txt"
 
-    # xense-openpi uses transformers>=5.5,<5.6 and keeps Pi0 deltas as HF subclasses
-    # under openpi/models_pytorch/transformers_compat/. The old transformers_replace
-    # source-tree patch only exists for the original RLinf/openpi (transformers 4.53.2).
-    # Conditionally copy so the install does not fail when the directory is absent.
     local py_major_minor
     py_major_minor=$(python - <<'EOF'
 import sys
@@ -1400,12 +1398,22 @@ print(f"{sys.version_info.major}.{sys.version_info.minor}")
 EOF
 )
     local transformers_replace_dir="$VENV_DIR/lib/python${py_major_minor}/site-packages/openpi/models_pytorch/transformers_replace"
-    if [ -d "$transformers_replace_dir" ]; then
+    if [ "$ENV_NAME" = "arx_x5_dual" ]; then
+        # xense-openpi uses transformers>=5.5,<5.6 and keeps Pi0 deltas as HF
+        # subclasses under transformers_compat/. The transformers_replace
+        # source-tree patch does not ship in this fork, so skip gracefully.
+        if [ -d "$transformers_replace_dir" ]; then
+            echo "[install_openpi_model] Patching transformers with openpi/transformers_replace..."
+            cp -r "$transformers_replace_dir/"* \
+                "$VENV_DIR/lib/python${py_major_minor}/site-packages/transformers/"
+        else
+            echo "[install_openpi_model] transformers_replace not found; skipping copy (expected for xense-openpi)."
+        fi
+    else
+        # Original RLinf/openpi requires transformers_replace patch.
         echo "[install_openpi_model] Patching transformers with openpi/transformers_replace..."
         cp -r "$transformers_replace_dir/"* \
             "$VENV_DIR/lib/python${py_major_minor}/site-packages/transformers/"
-    else
-        echo "[install_openpi_model] transformers_replace not found; skipping copy (expected for xense-openpi / transformers>=5.x)."
     fi
 
     bash $SCRIPT_DIR/embodied/download_assets.sh --assets openpi
@@ -1696,18 +1704,18 @@ install_xense_openpi() {
     local xense_openpi_dir
     xense_openpi_dir=$(clone_or_reuse_repo XENSE_OPENPI_PATH \
         "$VENV_DIR/xense-openpi" \
-        "${GITHUB_PREFIX}${OPENPI_REPO_URL}")
+        "${GITHUB_PREFIX}${XENSE_OPENPI_REPO_URL}")
 
     if [ -n "$(git -C "$xense_openpi_dir" status --porcelain)" ]; then
         echo "xense-openpi checkout has local changes: $xense_openpi_dir" >&2
         echo "Commit or stash them before installing." >&2
         exit 1
     fi
-    if ! git -C "$xense_openpi_dir" cat-file -e "$OPENPI_COMMIT^{commit}" 2>/dev/null; then
+    if ! git -C "$xense_openpi_dir" cat-file -e "$XENSE_OPENPI_COMMIT^{commit}" 2>/dev/null; then
         git -C "$xense_openpi_dir" fetch \
-            "${GITHUB_PREFIX}${OPENPI_REPO_URL}" "$OPENPI_COMMIT"
+            "${GITHUB_PREFIX}${XENSE_OPENPI_REPO_URL}" "$XENSE_OPENPI_COMMIT"
     fi
-    git -C "$xense_openpi_dir" checkout --detach "$OPENPI_COMMIT"
+    git -C "$xense_openpi_dir" checkout --detach "$XENSE_OPENPI_COMMIT"
 
     echo "Installing pinned xense-client and xense-openpi inference packages..."
     uv pip install -e "$xense_openpi_dir/packages/xense-client"
@@ -1791,6 +1799,8 @@ install_franka_realworld_env() {
 install_env_only() {
     if [ "$ENV_NAME" = "d4rl" ]; then
         PYTHON_VERSION="3.10"
+    elif [ "$ENV_NAME" = "arx_x5_dual" ]; then
+        PYTHON_VERSION="$XENSE_OPENPI_PYTHON_VERSION"
     fi
     create_and_sync_venv
     SKIP_ROS=${SKIP_ROS:-0}
@@ -2153,8 +2163,26 @@ install_arx_x5_dual_env() {
 
     # ---- 1. 用 conda 安装 C++ 编译依赖（到 SDK 目录下的 conda env） ----
     local arx5_conda_env="$VENV_DIR/arx5-conda-env"
+    local recreate_arx5_conda_env=0
     if [ ! -x "$arx5_conda_env/bin/python" ] || \
     [ ! -f "$arx5_conda_env/share/kdl_parser/cmake/kdl_parserConfig.cmake" ]; then
+        recreate_arx5_conda_env=1
+    else
+        local arx5_conda_python_version
+        arx5_conda_python_version="$($arx5_conda_env/bin/python -c 'import platform; print(platform.python_version())')"
+        if [[ "$PYTHON_VERSION" == *.*.* ]]; then
+            if [ "$arx5_conda_python_version" != "$PYTHON_VERSION" ]; then
+                recreate_arx5_conda_env=1
+            fi
+        elif [[ "$arx5_conda_python_version" != "$PYTHON_VERSION".* ]]; then
+            recreate_arx5_conda_env=1
+        fi
+        if [ "$recreate_arx5_conda_env" -eq 1 ]; then
+            echo "ARX5 Conda Python version mismatch: required ${PYTHON_VERSION}, found ${arx5_conda_python_version}. Recreating environment..." >&2
+        fi
+    fi
+
+    if [ "$recreate_arx5_conda_env" -eq 1 ]; then
 
     echo "Creating conda environment for ARX5 C++ build deps..."
 
@@ -2183,6 +2211,7 @@ install_arx_x5_dual_env() {
     "$arx5_conda_env/bin/python" -m pip install atomics \
         || { echo "atomics installation failed" >&2; exit 1; }
     fi
+    echo "Using ARX5 Conda Python: $(realpath "$arx5_conda_env/bin/python") ($($arx5_conda_env/bin/python -c 'import platform; print(platform.python_version())'))"
     local conda_prefix="$arx5_conda_env"
     export CONDA_PREFIX="$conda_prefix"
 

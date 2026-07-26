@@ -127,9 +127,8 @@ class ArxX5DualInputs(transforms.DataTransformFn):
         head, left_wrist, right_wrist = _extract_three_views(data)
 
         inputs = {
-            # norm_stats 保留的是 ARX 原始 14 维统计量。此处必须先保持
-            # 14 维完成归一化，再由 ModelTransformFactory 中的
-            # PadStatesAndActions 补到 π0.5 内部的 32 维。
+            # OpenPI 后续输入流程会根据模型需要自动补齐 state 维度。这里必须
+            # 保留 ARX 原始的 14 维，避免重复补维。
             "state": state,
             "image": {
                 "base_0_rgb": head,

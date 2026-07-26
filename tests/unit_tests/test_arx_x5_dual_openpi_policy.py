@@ -53,7 +53,6 @@ def test_openpi_input_maps_head_and_two_wrist_cameras():
     np.testing.assert_array_equal(result["image"]["base_0_rgb"], head)
     np.testing.assert_array_equal(result["image"]["left_wrist_0_rgb"], left_wrist)
     np.testing.assert_array_equal(result["image"]["right_wrist_0_rgb"], right_wrist)
-    assert result["state"].shape == (14,)
     np.testing.assert_array_equal(result["state"], state)
     assert result["prompt"] == "把物体放入盒中"
 
