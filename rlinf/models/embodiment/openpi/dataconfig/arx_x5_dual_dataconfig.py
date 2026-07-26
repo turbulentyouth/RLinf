@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ARX X5 双臂绝对关节位置数据配置。"""
+"""ARX X5 双臂增量关节位置数据配置。"""
 
 from __future__ import annotations
 
 import dataclasses
 import pathlib
 
+import numpy as np
 import openpi.models.model as _model
 import openpi.transforms as _transforms
 from openpi.training.config import DataConfig, DataConfigFactory, ModelTransformFactory
@@ -31,9 +32,10 @@ from rlinf.models.embodiment.openpi.policies import arx_x5_dual_policy
 class ArxX5DualDataConfig(DataConfigFactory):
     """把 ARX LeRobot 数据和在线 observation 接到同一套 π0.5 转换链。
 
-    当前配置明确采用绝对关节动作：数据集中的 14 维 ``actions`` 会直接归一化
-    并送入 π0.5，不增加 ``DeltaActions``；推理输出反归一化后也直接返回绝对
-    关节位置。这样 SFT 数据、π0.5 checkpoint 和 Env.step 的动作含义完全一致。
+    当前配置明确采用增量关节动作：训练时通过 ``DeltaActions`` 把绝对动作
+    转为增量送给模型学习；推理时通过 ``AbsoluteActions`` 把模型输出的增量
+    还原为绝对位置，再传给 ``ArxX5DualEnv.step(action)``。夹爪使用绝对值，
+    不参与增量转换。
 
     Attributes:
         default_prompt: 当数据集中没有任务文本时注入的默认指令。
@@ -82,6 +84,13 @@ class ArxX5DualDataConfig(DataConfigFactory):
                 )
             ],
             outputs=[arx_x5_dual_policy.ArxX5DualOutputs()],
+        )
+        delta_action_mask = np.array(
+            [True] * 6 + [False] + [True] * 6 + [False], dtype=bool
+        )
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
         )
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(
             model_config
