@@ -22,6 +22,7 @@ import gymnasium as gym
 from gymnasium.envs.registration import register
 
 from rlinf.envs.realworld.arx_x5_dual.arx_x5_dual_env import ArxX5DualEnv
+from rlinf.envs.realworld.arx_x5_dual.recorder import ArxX5DualLeRobotRecorder
 from rlinf.envs.realworld.common.wrappers import KeyboardEvalControlWrapper
 
 
@@ -55,6 +56,25 @@ def create_arx_x5_dual_env(
         env_idx=env_idx,
     )
     control = env_cfg.get("episode_control", {})
+    recording = env_cfg.get("recording", {})
+    recorder = None
+    if recording and bool(recording.get("enabled", False)):
+        task = str(recording.get("task") or override_cfg.get("task_description", ""))
+        recorder = ArxX5DualLeRobotRecorder(
+            repo_id=str(recording["repo_id"]),
+            root=recording.get("root"),
+            task=task,
+            fps=int(
+                recording.get(
+                    "fps", round(float(override_cfg.get("step_frequency", 30.0)))
+                )
+            ),
+            image_height=int(override_cfg.get("image_height", 224)),
+            image_width=int(override_cfg.get("image_width", 224)),
+            use_videos=bool(recording.get("use_videos", True)),
+            image_writer_threads=int(recording.get("image_writer_threads", 4)),
+            image_writer_processes=int(recording.get("image_writer_processes", 0)),
+        )
     if control and bool(control.get("enabled", False)):
         env = KeyboardEvalControlWrapper(
             env,
@@ -65,6 +85,15 @@ def create_arx_x5_dual_env(
             reset_wait_seconds=float(control.get("reset_wait_seconds", 0.0)),
             continue_key="Key.right",
             preserve_env_done=True,
+            episode_recorder=recorder,
+            save_keys=("Key.right",),
+            discard_keys=("Key.left",),
+            exit_keys=("Key.esc",),
+        )
+    if recorder is not None and not bool(control.get("enabled", False)):
+        recorder.close()
+        raise ValueError(
+            "ARX recording requires env.eval.episode_control.enabled=true."
         )
     return env
 

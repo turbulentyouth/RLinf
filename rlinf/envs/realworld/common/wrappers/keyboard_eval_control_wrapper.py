@@ -46,6 +46,10 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         reset_wait_seconds: float | None = None,
         continue_key: str | None = None,
         preserve_env_done: bool = False,
+        episode_recorder: Any | None = None,
+        save_keys: tuple[str, ...] = (),
+        discard_keys: tuple[str, ...] = (),
+        exit_keys: tuple[str, ...] = (),
     ):
         super().__init__(env)
         if reset_wait_seconds is not None and reset_wait_seconds < 0:
@@ -58,6 +62,10 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         self.reset_wait_seconds = reset_wait_seconds
         self.continue_key = continue_key
         self.preserve_env_done = preserve_env_done
+        self.episode_recorder = episode_recorder
+        self.save_keys = set(save_keys)
+        self.discard_keys = set(discard_keys)
+        self.exit_keys = set(exit_keys)
         self._running = False
         self._last_obs: Any = None
         self._last_press_ts: dict[str, float] = {}
@@ -111,8 +119,13 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
             return self._idle_response(event=None)
 
         # Running: forward to the wrapped env.
+        pre_step_obs = self._last_obs
         obs, reward, terminated, truncated, info = self.env.step(action)
         self._last_obs = obs
+
+        if self.episode_recorder is not None:
+            recorded_action = info.get("executed_action", action)
+            self.episode_recorder.add_frame(pre_step_obs, recorded_action)
 
         if not self.preserve_env_done:
             terminated = False
@@ -124,10 +137,22 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
             if now - self._last_press_ts.get(key, -math.inf) < self.PEDAL_DEBOUNCE_S:
                 continue
             self._last_press_ts[key] = now
+            if key in self.exit_keys:
+                if self.episode_recorder is not None:
+                    self.episode_recorder.discard_episode("exit key pressed")
+                self._running = False
+                raise KeyboardInterrupt
             if key in self.interrupt_keys:
                 truncated = True
                 result = "interrupted"
                 self._running = False
+                if self.episode_recorder is not None:
+                    if key in self.save_keys:
+                        self.episode_recorder.save_episode()
+                        result = "saved"
+                    elif key in self.discard_keys:
+                        self.episode_recorder.discard_episode("discard key pressed")
+                        result = "discarded"
                 break
             if key in self.success_keys:
                 terminated = True
@@ -145,6 +170,15 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         info["eval_phase"] = "rec" if self._running else "pre"
         info["eval_result"] = result
         return obs, reward, terminated, truncated, info
+
+    def close(self) -> None:
+        """Close the optional recorder before releasing the wrapped environment."""
+
+        try:
+            if self.episode_recorder is not None:
+                self.episode_recorder.close()
+        finally:
+            self.env.close()
 
     def _wait_after_reset(self, obs, info):
         """Wait for the configured delay or an early right-arrow press."""

@@ -110,8 +110,22 @@ env:
     max_steps_per_rollout_epoch: ${run_modes.${run_mode}.max_steps_per_rollout_epoch}
     episode_control:
       enabled: ${run_modes.${run_mode}.episode_control_enabled}
+      # 推理中：左方向键丢弃并 reset，右方向键保存并 reset，ESC 丢弃并退出。
       # 回到 start position 后等待的时间；等待期间按右方向键立即开始下一轮。
       reset_wait_seconds: 2000.0
+    recording:
+      # Equivalent to xense-openpi bi_arx5_real --record.
+      enabled: false
+      # Equivalent to --record_repo_id; defaults to the LeRobot cache.
+      repo_id: "xijingfeng/stack_cubes_0728"
+      # null uses the LeRobot default; an absolute path matches --record_root.
+      root: null
+      # null reuses override_cfg.task_description, matching --task.
+      task: null
+      fps: 30
+      use_videos: true
+      image_writer_threads: 4
+      image_writer_processes: 0
     override_cfg:
       dry_run: ${run_modes.${run_mode}.dry_run}
       is_dummy: ${run_modes.${run_mode}.is_dummy}
