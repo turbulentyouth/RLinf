@@ -170,14 +170,14 @@ def test_realworld_eval_config_is_rollout_only(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("config_name", "expected_mode"),
+    ("run_mode", "expected_mode"),
     [
-        ("realworld_eval_arx_x5_dual_pi05_dryrun_hardware", "hardware"),
-        ("realworld_eval_arx_x5_dual_pi05_dryrun_distributed", "distributed"),
+        ("hardware_dry_run", "hardware"),
+        ("distributed_dry_run", "distributed"),
     ],
 )
-def test_two_machine_dry_run_configs(monkeypatch, config_name, expected_mode):
-    """确认两种 dry-run 都保留两机推理拓扑并使用互斥硬件模式。"""
+def test_two_machine_dry_run_modes(monkeypatch, run_mode, expected_mode):
+    """确认统一配置的两种 dry-run 模式保留双机拓扑和互斥硬件模式。"""
 
     repo_path = Path(__file__).resolve().parents[2]
     config_dir = repo_path / "evaluations" / "realworld"
@@ -201,9 +201,13 @@ def test_two_machine_dry_run_configs(monkeypatch, config_name, expected_mode):
             monkeypatch.delenv(key, raising=False)
 
     with initialize_config_dir(version_base="1.1", config_dir=str(config_dir)):
-        cfg = compose(config_name=config_name)
+        cfg = compose(
+            config_name="realworld_eval_arx_x5_dual_pi05",
+            overrides=[f"run_mode={run_mode}"],
+        )
     OmegaConf.resolve(cfg)
 
+    assert cfg.run_mode == run_mode
     assert cfg.cluster.num_nodes == 2
     assert cfg.runner.only_eval is True
     assert cfg.env.eval.max_steps_per_rollout_epoch == 5
@@ -213,6 +217,7 @@ def test_two_machine_dry_run_configs(monkeypatch, config_name, expected_mode):
     assert cfg.runner.continuous_eval.enabled is True
     if expected_mode == "hardware":
         assert cfg.env.eval.override_cfg.start_position.move_in_hardware_dry_run is True
+        assert cfg.env.eval.override_cfg.start_position.enabled is True
     else:
         assert cfg.env.eval.override_cfg.start_position.enabled is False
     if expected_mode == "distributed":

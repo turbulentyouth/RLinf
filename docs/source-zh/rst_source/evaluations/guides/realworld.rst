@@ -354,10 +354,28 @@ Dual Franka SFT 部署复用统一评测启动器，并通过配置回退使用
 ARX X5 双臂持续推理
 -------------------
 
-``realworld_eval_arx_x5_dual_pi05.yaml`` 复用共享配置
-``_realworld_eval_arx_x5_dual_pi05_common.yaml``，运行行为全部由 YAML 控制：
+``realworld_eval_arx_x5_dual_pi05.yaml`` 包含 ARX X5 双臂的全部运行模式。
+通过唯一的 ``run_mode`` 参数选择运行行为：
+
+.. code-block:: bash
+
+   # 真实相机、真实机械臂，并下发模型动作。
+   bash evaluations/run_eval.sh realworld realworld_eval_arx_x5_dual_pi05 \
+       run_mode=real
+
+   # 读取真实相机和机械臂反馈，但禁止下发模型动作。
+   bash evaluations/run_eval.sh realworld realworld_eval_arx_x5_dual_pi05 \
+       run_mode=hardware_dry_run
+
+   # 不连接相机和机械臂，使用 dummy observation 测试双机推理链路。
+   bash evaluations/run_eval.sh realworld realworld_eval_arx_x5_dual_pi05 \
+       run_mode=distributed_dry_run
+
+统一 YAML 会把所选模式映射为对应的环境安全参数：
 
 .. code-block:: yaml
+
+   run_mode: real
 
    runner:
      continuous_eval:
@@ -375,6 +393,7 @@ ARX X5 双臂持续推理
            right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
            duration: 30.0
 
+可选值为 ``real``、``hardware_dry_run`` 和 ``distributed_dry_run``。
 start position 只在第一次模型推理前移动一次。后续持续推理周期保留机械臂
 当前位置，不会反复返回起始位。hardware dry-run 配置将
 ``move_in_hardware_dry_run`` 设为 ``true``：只允许这一次受保护的初始化移动，

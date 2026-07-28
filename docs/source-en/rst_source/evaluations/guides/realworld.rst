@@ -356,11 +356,28 @@ see :doc:`../../examples/embodied/dual_franka`.
 ARX X5 Dual-Arm Continuous Inference
 ------------------------------------
 
-``realworld_eval_arx_x5_dual_pi05.yaml`` uses the shared configuration
-``_realworld_eval_arx_x5_dual_pi05_common.yaml``. Its behavior is controlled
-entirely by YAML settings:
+``realworld_eval_arx_x5_dual_pi05.yaml`` contains all ARX X5 dual-arm modes.
+Select the behavior with the single ``run_mode`` override:
+
+.. code-block:: bash
+
+   # Real cameras, real arms, and model actions enabled.
+   bash evaluations/run_eval.sh realworld realworld_eval_arx_x5_dual_pi05 \
+       run_mode=real
+
+   # Real cameras and arm feedback, but model actions are suppressed.
+   bash evaluations/run_eval.sh realworld realworld_eval_arx_x5_dual_pi05 \
+       run_mode=hardware_dry_run
+
+   # No cameras or arms; test the two-node inference path with dummy observations.
+   bash evaluations/run_eval.sh realworld realworld_eval_arx_x5_dual_pi05 \
+       run_mode=distributed_dry_run
+
+The unified YAML maps the selected mode to the environment safety settings:
 
 .. code-block:: yaml
+
+   run_mode: real
 
    runner:
      continuous_eval:
@@ -378,12 +395,14 @@ entirely by YAML settings:
            right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
            duration: 30.0
 
-The start-position motion runs only before the first model inference. Later
+The valid values are ``real``, ``hardware_dry_run``, and
+``distributed_dry_run``. The start-position motion runs only before the first
+model inference. Later
 continuous cycles keep the current robot state and do not return to the start
-position. The hardware dry-run config sets
+position. The ``hardware_dry_run`` mode sets
 ``move_in_hardware_dry_run: true``: this permits only the guarded initial
 motion, returns both arms to damping mode, and still suppresses every model
-action. The distributed dry-run disables start-position motion.
+action. The ``distributed_dry_run`` mode disables start-position motion.
 
 Press ``Ctrl+C`` to stop continuous inference. RLinf waits for the current
 five-step cycle to finish, closes the real-world environment, and returns the

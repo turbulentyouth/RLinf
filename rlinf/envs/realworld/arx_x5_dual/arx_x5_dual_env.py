@@ -61,6 +61,7 @@ class ArxX5DualStartPositionConfig:
 
     enabled: bool = False
     move_in_hardware_dry_run: bool = False
+    move_on_every_reset: bool = False
     left_joints: list[float] = field(
         default_factory=lambda: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
     )
@@ -483,8 +484,8 @@ class ArxX5DualEnv(gym.Env):
         """将三个物理相机序列号映射到固定的 π0.5 图像名称。
 
         分辨率与帧率与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持
-        一致：640x480 @ 30 fps。最终返回给策略的图像会再被中心裁剪并 resize
-        到 ``image_height x image_width``。
+        一致：640x480 @ 30 fps。最终返回给策略的图像会保持宽高比 resize，
+        再用黑色像素补齐到 ``image_height x image_width``。
         """
 
         default_type = self.config.camera_type
@@ -542,7 +543,7 @@ class ArxX5DualEnv(gym.Env):
         """检查相机帧的形状、类型和数值有效性。
 
         与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持一致：要求
-        返回 HWC uint8 图像且不含 NaN/Inf。返回数组副本供后续裁剪 resize。
+        返回 HWC uint8 图像且不含 NaN/Inf。返回的数组供后续 RGB 转换与 resize。
         """
 
         array = np.asarray(frame)
@@ -555,6 +556,53 @@ class ArxX5DualEnv(gym.Env):
         if not np.all(np.isfinite(array)):
             raise ValueError(f"相机 {name!r} 图像包含 NaN 或 Inf。")
         return array
+
+    @staticmethod
+    def _resize_with_pad(
+        image: np.ndarray,
+        target_height: int,
+        target_width: int,
+    ) -> np.ndarray:
+        """保持宽高比缩放图像，并用零像素居中补齐目标尺寸。
+
+        该处理与 ``xense-openpi/examples/bi_arx5_real/env.py`` 使用的
+        ``xense_client.image_tools.resize_with_pad`` 保持一致。例如原始
+        ``480x640`` 图像送入 ``224x224`` 目标时，会缩放为 ``168x224``，
+        然后在上下各补 28 行黑色像素，不裁剪画面，也不拉伸物体。
+
+        Args:
+            image: ``HWC uint8`` 图像。
+            target_height: 输出图像高度。
+            target_width: 输出图像宽度。
+
+        Returns:
+            形状为 ``(target_height, target_width, C)`` 的 ``uint8`` 图像。
+        """
+
+        height, width = image.shape[:2]
+        if (height, width) == (target_height, target_width):
+            return image.copy()
+
+        scale = min(target_width / width, target_height / height)
+        resized_width = max(1, int(width * scale))
+        resized_height = max(1, int(height * scale))
+        resized = cv2.resize(
+            image,
+            (resized_width, resized_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+        padded = np.zeros(
+            (target_height, target_width, image.shape[2]),
+            dtype=image.dtype,
+        )
+        start_x = (target_width - resized_width) // 2
+        start_y = (target_height - resized_height) // 2
+        padded[
+            start_y : start_y + resized_height,
+            start_x : start_x + resized_width,
+        ] = resized
+        return padded
 
     def _read_camera_frames(self) -> dict[str, np.ndarray]:
         """同步读取三路相机，并转换成 π0.5 所需的 RGB 图像。
@@ -569,9 +617,9 @@ class ArxX5DualEnv(gym.Env):
             ValueError: 相机返回的帧形状、类型或数值异常。
 
         Notes:
-            RLinf 相机后端输出 BGR；函数在 resize 后通过 ``[..., ::-1]``
-            转成 RGB。如果运行中偶发超时，会使用该相机上一张成功图像，避免
-            单路相机抖动直接中断整个 rollout。
+            RLinf 相机后端输出 BGR。函数先转成 RGB，再按照 xense-openpi 的
+            BiARX5 推理方式保持宽高比缩放并补黑边。如果运行中偶发超时，会
+            使用该相机上一张成功图像，避免单路相机抖动直接中断 rollout。
         """
 
         frames: dict[str, np.ndarray] = {}
@@ -593,20 +641,12 @@ class ArxX5DualEnv(gym.Env):
             # BGR 通道，避免 ``[..., ::-1]`` 把深度误当成颜色。
             frame = frame[..., :3]
 
-            height, width = frame.shape[:2]
-            crop_size = min(height, width)
-            start_x = (width - crop_size) // 2
-            start_y = (height - crop_size) // 2
-            square = frame[
-                start_y : start_y + crop_size,
-                start_x : start_x + crop_size,
-            ]
-            resized = cv2.resize(
-                square,
-                (self.config.image_width, self.config.image_height),
-                interpolation=cv2.INTER_AREA,
+            rgb = np.ascontiguousarray(frame[..., ::-1], dtype=np.uint8)
+            frames[name] = self._resize_with_pad(
+                rgb,
+                self.config.image_height,
+                self.config.image_width,
             )
-            frames[name] = np.ascontiguousarray(resized[..., ::-1], dtype=np.uint8)
         return frames
 
     def _read_robot_state(self) -> None:
@@ -813,11 +853,11 @@ class ArxX5DualEnv(gym.Env):
         )
 
     def _maybe_move_to_start_position(self) -> None:
-        """仅在首次 reset 且当前运行模式允许时执行起始位移动。"""
+        """按配置在首次或每次 reset 时执行起始位移动。"""
 
         cfg = self.config.start_position
         if (
-            self._start_position_initialized
+            (self._start_position_initialized and not cfg.move_on_every_reset)
             or self.config.is_dummy
             or not cfg.enabled
             or (self.config.dry_run and not cfg.move_in_hardware_dry_run)

@@ -22,6 +22,7 @@ import gymnasium as gym
 from gymnasium.envs.registration import register
 
 from rlinf.envs.realworld.arx_x5_dual.arx_x5_dual_env import ArxX5DualEnv
+from rlinf.envs.realworld.common.wrappers import KeyboardEvalControlWrapper
 
 
 def create_arx_x5_dual_env(
@@ -47,18 +48,28 @@ def create_arx_x5_dual_env(
         observation 包装以及把动作 chunk 逐步传入 ``env.step``。
     """
 
-    del env_cfg
-    return ArxX5DualEnv(
+    env = ArxX5DualEnv(
         override_cfg=override_cfg,
         worker_info=worker_info,
         hardware_info=hardware_info,
         env_idx=env_idx,
     )
+    control = env_cfg.get("episode_control", {})
+    if control and bool(control.get("enabled", False)):
+        env = KeyboardEvalControlWrapper(
+            env,
+            start_keys=(),
+            success_keys=(),
+            failure_keys=(),
+            interrupt_keys=("Key.left", "Key.right"),
+            reset_wait_seconds=float(control.get("reset_wait_seconds", 0.0)),
+            continue_key="Key.right",
+            preserve_env_done=True,
+        )
+    return env
 
 
 register(
     id="ArxX5DualEnv-v1",
-    entry_point=(
-        "rlinf.envs.realworld.arx_x5_dual.tasks:create_arx_x5_dual_env"
-    ),
+    entry_point=("rlinf.envs.realworld.arx_x5_dual.tasks:create_arx_x5_dual_env"),
 )

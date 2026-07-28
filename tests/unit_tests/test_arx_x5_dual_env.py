@@ -383,8 +383,8 @@ def test_camera_frames_are_mapped_to_three_rgb_views(monkeypatch):
     env = ArxX5DualEnv(
         override_cfg={
             "is_dummy": True,
-            "image_height": 4,
-            "image_width": 4,
+            "image_height": 6,
+            "image_width": 8,
         }
     )
     env._cameras = [
@@ -403,9 +403,24 @@ def test_camera_frames_are_mapped_to_three_rgb_views(monkeypatch):
     np.testing.assert_array_equal(frames["base_0_rgb"][0, 0], [30, 20, 10])
     np.testing.assert_array_equal(frames["left_wrist_0_rgb"][0, 0], [60, 50, 40])
     np.testing.assert_array_equal(frames["right_wrist_0_rgb"][0, 0], [90, 80, 70])
-    assert all(frame.shape == (4, 4, 3) for frame in frames.values())
+    assert all(frame.shape == (6, 8, 3) for frame in frames.values())
 
     env.close()
+
+
+def test_camera_frames_resize_with_pad_without_distortion(monkeypatch):
+    """确认 4:3 图像按 xense-openpi 方式缩放并补边，而不是裁剪或拉伸。"""
+
+    _, ArxX5DualEnv = _import_arx_classes(monkeypatch)
+    image = np.full((6, 8, 3), 255, dtype=np.uint8)
+
+    resized = ArxX5DualEnv._resize_with_pad(image, 8, 8)
+
+    assert resized.shape == (8, 8, 3)
+    assert resized.dtype == np.uint8
+    np.testing.assert_array_equal(resized[0], np.zeros((8, 3), dtype=np.uint8))
+    np.testing.assert_array_equal(resized[-1], np.zeros((8, 3), dtype=np.uint8))
+    np.testing.assert_array_equal(resized[1:7], np.full((6, 8, 3), 255))
 
 
 def test_hardware_dry_run_reads_devices_without_sending_actions(monkeypatch):

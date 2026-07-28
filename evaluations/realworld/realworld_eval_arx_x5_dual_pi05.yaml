@@ -1,14 +1,15 @@
-# ARX X5 双臂 + OpenPI pi0.5 两机正式推理配置。
+# ARX X5 双臂 + OpenPI pi0.5 两机统一评估配置。
 #
-# 节点 0（GPU 服务器）：运行 eval 入口和 rollout，仅负责模型推理。
-# 节点 1（机器人电脑）：读取真实相机/关节状态并向机械臂下发动作。
-#
-# 机器人 Python、PyTorch checkpoint、norm stats 和数据集 repo_id 已固定在
-# 共用配置中。正式推理仍需通过 ARX_*_CAMERA_SERIAL 设置三路 RealSense 序列号。
+# 使用 run_mode 在正式运行和两种 dry-run 之间切换：
+#   real: 连接机械臂和相机，并下发模型动作。
+#   hardware_dry_run: 读取真实硬件，但不下发模型动作。
+#   distributed_dry_run: 不连接硬件，使用零图像和内存关节状态测试双机链路。
 
 defaults:
-  - _realworld_eval_arx_x5_dual_pi05_common
+  - env/realworld_arx_x5_dual_joint@env.eval
+  - model/pi0_5@rollout.model
   - _self_
+  - override hydra/job_logging: stdout
 
 hydra:
   run:
@@ -16,3 +17,150 @@ hydra:
   output_subdir: null
   searchpath:
     - file://${oc.env:EMBODIED_PATH}/config/
+
+# 命令行覆盖：run_mode=real|hardware_dry_run|distributed_dry_run。
+run_mode: distributed_dry_run
+run_modes:
+  real:
+    experiment_name: realworld-eval-arx-x5-dual-pi05
+    dry_run: false
+    is_dummy: false
+    max_episode_steps: 5000
+    max_num_steps: 5000
+    max_steps_per_rollout_epoch: 5000
+    episode_control_enabled: true
+    start_position_enabled: true
+    move_in_hardware_dry_run: false
+  hardware_dry_run:
+    experiment_name: realworld-eval-arx-x5-dual-pi05-dryrun-hardware
+    dry_run: true
+    is_dummy: false
+    max_episode_steps: 500
+    max_num_steps: 500
+    max_steps_per_rollout_epoch: 500
+    episode_control_enabled: true
+    start_position_enabled: true
+    move_in_hardware_dry_run: true
+  distributed_dry_run:
+    experiment_name: realworld-eval-arx-x5-dual-pi05-dryrun-distributed
+    dry_run: false
+    is_dummy: true
+    max_episode_steps: 5
+    max_num_steps: 5
+    max_steps_per_rollout_epoch: 50
+    episode_control_enabled: false
+    start_position_enabled: false
+    move_in_hardware_dry_run: false
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    rollout:
+      node_group: inference
+      placement: 0
+    env:
+      node_group: robot
+      placement: 0
+  node_groups:
+    - label: inference
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      env_configs:
+        - node_ranks: 1
+          python_interpreter_path: /home/xi/Downloads/RLinf/.venv/bin/python3
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: "../results"
+    project_name: arx-x5-dual-openpi
+    experiment_name: ${run_modes.${run_mode}.experiment_name}
+    logger_backends: ["tensorboard"]
+  max_epochs: 1
+  max_steps: 1
+  only_eval: true
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+  continuous_eval:
+    enabled: true
+    max_cycles: null
+
+checkpoint_conversion:
+  enabled: true
+  checkpoint_path: /home/li/hubo/RLinf/30000_torch
+  converted_checkpoint_dir: ${oc.env:ARX_PI05_TORCH_CHECKPOINT,null}
+  resolved_checkpoint_dir: null
+  config_name: ${rollout.model.openpi.config_name}
+  precision: "bfloat16"
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: false
+  eval:
+    rollout_epoch: 1
+    total_num_envs: 1
+    group_size: 1
+    auto_reset: true
+    ignore_terminations: false
+    is_eval: true
+    max_episode_steps: ${run_modes.${run_mode}.max_episode_steps}
+    max_steps_per_rollout_epoch: ${run_modes.${run_mode}.max_steps_per_rollout_epoch}
+    episode_control:
+      enabled: ${run_modes.${run_mode}.episode_control_enabled}
+      # 回到 start position 后等待的时间；等待期间按右方向键立即开始下一轮。
+      reset_wait_seconds: 2000.0
+    override_cfg:
+      dry_run: ${run_modes.${run_mode}.dry_run}
+      is_dummy: ${run_modes.${run_mode}.is_dummy}
+      left_interface: ${oc.env:ARX_LEFT_INTERFACE,can1}
+      right_interface: ${oc.env:ARX_RIGHT_INTERFACE,can3}
+      head_camera_serial: ${oc.env:ARX_HEAD_CAMERA_SERIAL,230322271365} # 230322271365
+      left_wrist_camera_serial: ${oc.env:ARX_LEFT_CAMERA_SERIAL,230422271416} # 230422271416
+      right_wrist_camera_serial: ${oc.env:ARX_RIGHT_CAMERA_SERIAL,230322274234} # 230322274234
+      task_description: "centre the blue cube, stack green cube on top of the blue cube, stack yellow cube on top of the green cube, stack red cube on top of the yellow cube."
+      max_num_steps: ${run_modes.${run_mode}.max_num_steps}
+      step_frequency: 30.0
+      start_position:
+        enabled: ${run_modes.${run_mode}.start_position_enabled}
+        move_in_hardware_dry_run: ${run_modes.${run_mode}.move_in_hardware_dry_run}
+        move_on_every_reset: true
+        left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+        right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+        left_gripper: 0.5
+        right_gripper: 0.5
+        duration: 30.0
+        control_frequency: 50.0
+        max_joint_delta: 1.2
+        max_final_error: 0.15
+        max_control_lag: 0.25
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: false
+  enable_offload: false
+  pipeline_stage_num: 1
+  collect_transitions: false
+  collect_prev_infos: false
+  model:
+    model_path: ${checkpoint_conversion.checkpoint_path}
+    precision: null
+    num_action_chunks: 50
+    action_dim: 14
+    num_steps: 5
+    add_value_head: false
+    openpi:
+      config_name: "pi05_arx_x5_dual"
+      num_images_in_input: 3
+      train_expert_only: false
+      detach_critic_input: true
+      action_chunk: ${rollout.model.num_action_chunks}
+      action_env_dim: ${rollout.model.action_dim}
+      num_steps: ${rollout.model.num_steps}
+      add_value_head: ${rollout.model.add_value_head}
+    openpi_data:
+      repo_id: Xense/stack_cubes_0722
+      norm_stats_path: /home/li/hubo/RLinf/30000/assets/Xense/stack_cubes_0722

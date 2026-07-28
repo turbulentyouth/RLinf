@@ -19,8 +19,8 @@ reward_mode: raw
 wrap_obs_mode: simple
 seed: 0
 use_fixed_reset_state_ids: false
-max_steps_per_rollout_epoch: 300
-max_episode_steps: 300
+max_steps_per_rollout_epoch: 50000
+max_episode_steps: 50000
 
 # 头部相机是 π0.5 的主视角。RealWorldEnv 会把它映射为 main_images；
 # 其余两路按名称排序后堆叠为 extra_view_images，顺序是左腕、右腕。
@@ -46,14 +46,15 @@ init_params:
 override_cfg:
   # 必须确认型号。ARX 官方说明：使用错误型号可能引发危险运动。
   robot_model: "X5"
-  left_interface: "can0"
-  right_interface: "can1"
+  left_interface: "can1"
+  right_interface: "can3"
 
   # 替换为机器人电脑实际连接的三路相机序列号。
-  head_camera_serial: "HEAD_CAMERA_SERIAL"
-  left_wrist_camera_serial: "LEFT_WRIST_CAMERA_SERIAL"
-  right_wrist_camera_serial: "RIGHT_WRIST_CAMERA_SERIAL"
+  head_camera_serial: "230322271365"
+  left_wrist_camera_serial: "230422271416"
+  right_wrist_camera_serial: "230322274234"
   camera_type: "realsense"
+  # 与 xense-openpi BiARX5 推理一致：原始 640x480 图像等比例缩放后补黑边。
   image_height: 224
   image_width: 224
   camera_frame_timeout: 0.5
@@ -62,11 +63,11 @@ override_cfg:
   controller_dt: 0.002
   # 给 SDK 后台线程留出时间接收第一批真实状态，避免把默认零值当作当前姿态。
   controller_warmup_time: 0.5
-  step_frequency: 10.0
+  step_frequency: 30.0
 
   # SDK 在 0.03 秒内插值到新目标；同时将官方速度上限缩小到 20%。
   command_preview_time: 0.03
-  joint_velocity_limit_scale: 0.2
+  joint_velocity_limit_scale: 0.3
 
   # 参考项目使用的位置环增益缩放：降低 kp、提高 kd，减小首次上电冲击。
   kp_scale: 0.5
@@ -88,6 +89,7 @@ override_cfg:
   start_position:
     enabled: false
     move_in_hardware_dry_run: false
+    move_on_every_reset: false
     left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
     right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
     left_gripper: null
