@@ -63,6 +63,7 @@ class EnvWorker(Worker):
         self.train_video_cnt = 0
         self.eval_video_cnt = 0
         self.should_stop = False
+        self._eval_stop_requested = False
 
         self.env_list = []
         self.eval_env_list = []
@@ -1258,7 +1259,13 @@ class EnvWorker(Worker):
 
         return env_metrics
 
+    def request_eval_stop(self) -> None:
+        """Request cooperative termination of the active evaluation loop."""
+
+        self._eval_stop_requested = True
+
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
+        self._eval_stop_requested = False
         eval_metrics = defaultdict(list)
         for eval_rollout_epoch in range(self.eval_rollout_epoch):
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
@@ -1317,27 +1324,33 @@ class EnvWorker(Worker):
                     for key, value in env_info.items():
                         eval_metrics[key].append(value)
 
-                    if self.cfg.env.eval.auto_reset:
-                        if (
-                            eval_rollout_epoch == self.eval_rollout_epoch - 1
-                            and eval_step == self.n_eval_chunk_steps - 1
-                        ):
-                            continue
-                    else:
-                        if eval_step == self.n_eval_chunk_steps - 1:
-                            continue
-                    env_batch = env_output.to_dict()
-                    self.send_to(
-                        group_name=self.cfg.rollout.group_name,
-                        channel=rollout_channel,
-                        data=self._build_rollout_input_data(env_batch),
-                        mode="eval",
-                        tag="rollout_results",
-                        route_key=stage_id if not self.env_decoupled_mode else None,
-                        decoupled_mode=self.env_decoupled_mode,
+                    is_last_step = (
+                        eval_rollout_epoch == self.eval_rollout_epoch - 1
+                        and eval_step == self.n_eval_chunk_steps - 1
                     )
+                    should_send_next_obs = self._eval_stop_requested or (
+                        not is_last_step
+                        if self.cfg.env.eval.auto_reset
+                        else eval_step != self.n_eval_chunk_steps - 1
+                    )
+                    if should_send_next_obs:
+                        env_batch = env_output.to_dict()
+                        self.send_to(
+                            group_name=self.cfg.rollout.group_name,
+                            channel=rollout_channel,
+                            data=self._build_rollout_input_data(env_batch),
+                            mode="eval",
+                            tag="rollout_results",
+                            route_key=stage_id if not self.env_decoupled_mode else None,
+                            decoupled_mode=self.env_decoupled_mode,
+                        )
+
+                if self._eval_stop_requested:
+                    break
 
             self.finish_rollout(mode="eval")
+            if self._eval_stop_requested:
+                break
         for stage_id in range(self.stage_num):
             if self.eval_enable_offload:
                 get_env_attr(self.eval_env_list[stage_id], "offload")()

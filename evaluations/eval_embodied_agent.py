@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import signal
 
 import hydra
 import torch.multiprocessing as mp
@@ -29,6 +30,13 @@ from rlinf.workers.env.env_worker import EnvWorker
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 
 mp.set_start_method("spawn", force=True)
+
+
+def _raise_keyboard_interrupt(signum, frame) -> None:
+    """Route SIGTERM through the runner's orderly KeyboardInterrupt cleanup."""
+
+    del signum, frame
+    raise KeyboardInterrupt
 
 
 @hydra.main(
@@ -48,12 +56,18 @@ def main(cfg) -> None:
     # Create rollout worker group
     rollout_placement = component_placement.get_strategy("rollout")
     rollout_group = MultiStepRolloutWorker.create_group(cfg).launch(
-        cluster, name=cfg.rollout.group_name, placement_strategy=rollout_placement
+        cluster,
+        name=cfg.rollout.group_name,
+        placement_strategy=rollout_placement,
+        max_concurrency=2,
     )
     # Create env worker group
     env_placement = component_placement.get_strategy("env")
     env_group = EnvWorker.create_group(cfg).launch(
-        cluster, name=cfg.env.group_name, placement_strategy=env_placement
+        cluster,
+        name=cfg.env.group_name,
+        placement_strategy=env_placement,
+        max_concurrency=2,
     )
 
     runner = EmbodiedEvalRunner(
@@ -63,7 +77,11 @@ def main(cfg) -> None:
     )
 
     runner.init_workers()
-    runner.run()
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    try:
+        runner.run()
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 if __name__ == "__main__":

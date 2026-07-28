@@ -57,49 +57,50 @@ override_cfg:
   # 与 xense-openpi BiARX5 推理一致：原始 640x480 图像等比例缩放后补黑边。
   image_height: 224
   image_width: 224
-  camera_frame_timeout: 0.5
+  camera_frame_timeout: 0.2
 
-  # ARX SDK 后台通信保持 500 Hz；RLinf/π0.5 每秒更新 10 次绝对目标。
+  # ARX SDK 后台通信保持 500 Hz；RLinf/π0.5 每秒更新 30 次绝对目标。
   controller_dt: 0.002
   # 给 SDK 后台线程留出时间接收第一批真实状态，避免把默认零值当作当前姿态。
   controller_warmup_time: 0.5
   step_frequency: 30.0
 
-  # SDK 在 0.03 秒内插值到新目标；同时将官方速度上限缩小到 20%。
+  # SDK 在 0.03 秒内插值到新目标，不改写官方速度上限。
   command_preview_time: 0.03
-  joint_velocity_limit_scale: 0.3
+  # 与参考 BiARX5 高层轨迹一致：50 Hz ease_in_out_quad。
+  interpolation_controller_dt: 0.02
 
   # 参考项目使用的位置环增益缩放：降低 kp、提高 kd，减小首次上电冲击。
   kp_scale: 0.5
   kd_scale: 1.5
 
-  # 从硬限位两端各缩进 5%，并限制每次 Env step 最多变化 0.1 rad。
-  # π0.5 输出和最终 SDK 命令仍然都是“绝对关节位置”，不是 delta 动作。
-  joint_limit_margin_ratio: 0.05
-  max_joint_delta_per_step: 0.1
+  # 动作安全阈值严格使用参考仓库固定 X5 上下限的 0.9 倍；
+  # 超限直接报错，不裁剪，也不限制相邻 step 变化量。
 
-  # 两个夹爪维度同样使用绝对值，单位是 ARX SDK 的物理夹爪宽度：
-  # 0 表示闭合，最大值来自 robot_config.gripper_width（X5 通常为 0.088）。
+  # 两个夹爪维度同样使用绝对值，单位是 ARX SDK 的物理夹爪位置：
+  # 0 表示闭合，最大值来自 robot_config.gripper_width（X5 为 1.57）。
   # SFT 数据中的夹爪 state/action 必须使用同一单位，不能混用 0~1 归一化值。
 
   max_num_steps: 300
   task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
   skip_interface_check: false
-  # 默认不自动移动。评测主配置可启用一次 start position 初始化移动。
+  # 每次 reset 都以参考仓库的双臂同步 ease_in_out_quad 插值回到 start position。
   start_position:
-    enabled: false
-    move_in_hardware_dry_run: false
-    move_on_every_reset: false
     left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
     right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
-    left_gripper: null
-    right_gripper: null
-    duration: 30.0
-    control_frequency: 50.0
-    max_joint_delta: 1.2
-    max_final_error: 0.15
-    max_control_lag: 0.25
-  # hardware dry-run 默认不发送动作；可单独允许上述一次初始化移动。
+    left_gripper: 1.57
+    right_gripper: 1.57
+    duration: 2.0
+  # close() 在释放控制器前同步回到全零位；null duration 使用参考仓库的
+  # max(双臂最大关节距离, 1.0) * 2 秒自动时长。
+  home_position:
+    left_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    right_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    left_gripper: 0.0
+    right_gripper: 0.0
+    duration: null
+  # hardware dry-run 与参考 wrapper 一致：仍执行 connect/reset/start/home，
+  # 仅拦截模型动作。
   dry_run: false
   # distributed dry-run 使用 is_dummy=true，不要求连接机械臂、CAN 或相机。
   is_dummy: false

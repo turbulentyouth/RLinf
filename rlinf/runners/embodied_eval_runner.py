@@ -75,9 +75,15 @@ class EmbodiedEvalRunner:
                 rollout_handle.wait()
         except KeyboardInterrupt:
             self.logger.info(
-                "Manual stop requested; waiting for the current short evaluation "
-                "cycle to finish before closing the environments."
+                "Manual stop requested; asking evaluation workers to finish the "
+                "current action exchange before closing the environments."
             )
+            stop_handles = [
+                self.env.request_eval_stop(),
+                self.rollout.request_eval_stop(),
+            ]
+            for stop_handle in stop_handles:
+                stop_handle.wait()
             env_handle.wait()
             if not env_decoupled_mode:
                 rollout_handle.wait()

@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from typing import Any
 
@@ -72,9 +71,6 @@ class ArxX5JointController:
         preview_time: 新关节目标的插值预览时间，单位为秒。大于零时，SDK 会
             在当前命令和新目标之间插值，避免直接跳到目标位置。参考项目使用
             ``0.03``。
-        joint_velocity_limit_scale: 对 SDK 原始关节速度上限进行缩放。比如
-            ``0.2`` 表示只允许使用官方速度上限的 20%。SDK 官方建议在部署
-            初期主动降低速度限制。
         sdk_module: 仅供无硬件单元测试注入假的 ``pyarx`` 模块。正常运行时
             必须保持为 ``None``，届时函数会延迟导入真实 SDK。
 
@@ -121,20 +117,19 @@ class ArxX5JointController:
         interface_name: str,
         controller_dt: float = 0.002,
         preview_time: float = 0.03,
-        joint_velocity_limit_scale: float = 0.2,
         sdk_module: Any | None = None,
     ) -> None:
         if controller_dt <= 0:
             raise ValueError("controller_dt 必须大于 0。")
         if preview_time <= 0:
             raise ValueError("preview_time 必须大于 0，避免绝对关节目标瞬间跳变。")
-        if not 0 < joint_velocity_limit_scale <= 1:
-            raise ValueError("joint_velocity_limit_scale 必须位于 (0, 1]。")
-
         self._logger = get_logger()
         self.model = model
         self.interface_name = interface_name
         self._closed = False
+        # Match BiARX5's initial mode bookkeeping. The reference starts with this
+        # flag set and lets reset_to_home initialize the SDK command trajectory.
+        self._control_mode = "gravity_compensation"
 
         if sdk_module is None:
             # 延迟导入非常重要：GPU 服务器不需要安装 ARX SDK。只有被 Ray
@@ -156,16 +151,9 @@ class ArxX5JointController:
             )
         )
 
-        # 官方文档要求替换整个 numpy 数组，而不是对 joint_vel_max 的单个
-        # 元素原地赋值。缩小速度上限可以降低早期模型输出异常时的风险。
-        robot_config.joint_vel_max = (
-            np.asarray(robot_config.joint_vel_max, dtype=np.float64)
-            * joint_velocity_limit_scale
-        )
         controller_config.controller_dt = float(controller_dt)
         controller_config.default_preview_time = float(preview_time)
         controller_config.background_send_recv = True
-        controller_config.shutdown_to_passive = True
 
         self._robot_config = robot_config
         self._controller_config = controller_config
@@ -174,21 +162,21 @@ class ArxX5JointController:
             controller_config,
             interface_name,
         )
+        self._command_buffer = sdk_module.JointState(self.JOINT_DOF)
 
-    def enable_position_control(
+    @property
+    def control_mode(self) -> str:
+        """Return the control mode tracked by this wrapper."""
+
+        return self._control_mode
+
+    def set_to_normal_position_control(
         self, kp_scale: float = 0.5, kd_scale: float = 1.5
     ) -> None:
         """按参考流程启用位置控制。
 
-        与 ``toolkits/realworld_check/test_arx_x5_dual.py`` 保持一致：
-
-        1. 读取当前关节/夹爪状态；
-        2. 把当前位置写入 SDK 命令缓冲区，让控制器从当前姿态开始插值；
-        3. 等待 ``max(preview_time, controller_dt * 2)``，让后台线程收到命令；
-        4. 按 ``kp_scale`` / ``kd_scale`` 设置位置环增益。
-
-        控制器构造后默认处于阻尼/被动模式， Env 必须在发送第一条动作前调用
-        本函数，否则首次 ``set_joint_cmd`` 可能从零命令跳变到目标位置。
+        与参考 BiARX5 一致，本函数只在重力补偿模式下恢复普通位置增益。
+        平滑运动调用方负责在切换增益前先把实测当前位置写入命令缓冲区。
 
         Args:
             kp_scale: 对 SDK 默认关节 ``kp`` 的缩放比例。
@@ -201,6 +189,23 @@ class ArxX5JointController:
             raise ValueError("kp_scale 必须大于 0。")
         if kd_scale <= 0:
             raise ValueError("kd_scale 必须大于 0。")
+        if self._control_mode == "position":
+            return
+
+        config = self._controller_config
+        gain = self._controller.get_gain()
+        gain.kp()[:] = np.asarray(config.default_kp, dtype=np.float64) * kp_scale
+        gain.kd()[:] = np.asarray(config.default_kd, dtype=np.float64) * kd_scale
+        gain.gripper_kp = config.default_gripper_kp
+        gain.gripper_kd = config.default_gripper_kd
+        self._controller.set_gain(gain)
+        self._control_mode = "position"
+
+    def hold_current_position(self) -> None:
+        """把机械臂实测当前位置写入 SDK 命令缓冲区。"""
+
+        if self._closed:
+            raise RuntimeError(f"ARX 控制器 {self.interface_name!r} 已经关闭。")
 
         state = self._controller.get_joint_state()
         command = self._arx5.JointState(self.JOINT_DOF)
@@ -213,20 +218,30 @@ class ArxX5JointController:
             )[0]
         )
         self._controller.set_joint_cmd(command)
-        time.sleep(
-            max(
-                self._controller_config.default_preview_time,
-                self._controller_config.controller_dt * 2,
-            )
-        )
 
-        config = self._controller.get_controller_config()
-        gain = self._arx5.Gain(self.JOINT_DOF)
-        gain.kp()[:] = np.asarray(config.default_kp, dtype=np.float64) * kp_scale
-        gain.kd()[:] = np.asarray(config.default_kd, dtype=np.float64) * kd_scale
-        gain.gripper_kp = config.default_gripper_kp
-        gain.gripper_kd = config.default_gripper_kd
-        self._controller.set_gain(gain)
+    def enable_position_control(
+        self, kp_scale: float = 0.5, kd_scale: float = 1.5
+    ) -> None:
+        """Backward-compatible alias for normal position control."""
+
+        self.set_to_normal_position_control(kp_scale=kp_scale, kd_scale=kd_scale)
+
+    def reset_to_home(self) -> None:
+        """Use the SDK's built-in reset-to-home routine."""
+
+        if self._closed:
+            raise RuntimeError(f"ARX 控制器 {self.interface_name!r} 已经关闭。")
+        self._controller.reset_to_home()
+
+    def set_to_gravity_compensation(self) -> None:
+        """Switch to the SDK's low-damping gravity-compensation mode."""
+
+        if self._closed:
+            raise RuntimeError(f"ARX 控制器 {self.interface_name!r} 已经关闭。")
+        if self._control_mode == "gravity_compensation":
+            return
+        self._controller.set_to_gravity_compensation()
+        self._control_mode = "gravity_compensation"
 
     @property
     def joint_position_low(self) -> np.ndarray:
@@ -255,18 +270,6 @@ class ArxX5JointController:
         """返回绝对夹爪命令的最大值，也就是机械臂配置中的夹爪宽度。"""
 
         return float(self._robot_config.gripper_width)
-
-    @property
-    def joint_velocity_limit(self) -> np.ndarray:
-        """返回已经应用安全缩放后的六关节速度上限。"""
-
-        return np.asarray(self._robot_config.joint_vel_max, dtype=np.float64).copy()
-
-    @property
-    def gripper_velocity_limit(self) -> float:
-        """返回 SDK 配置中的夹爪速度上限。"""
-
-        return float(self._robot_config.gripper_vel_max)
 
     def read_state(self) -> ArxX5ArmState:
         """读取当前关节、夹爪和末端位姿反馈。
@@ -329,17 +332,15 @@ class ArxX5JointController:
 
         Args:
             joint_position: 形状为 ``(6,)`` 的绝对关节角，单位为弧度。
-                这些数值已经由 Env 做过安全边界缩进和单步变化限制；本函数
-                仍会再次检查 SDK 原始硬件范围，作为最后一道防线。
-            gripper_position: 绝对夹爪宽度，合法范围是
-                ``[0, robot_config.gripper_width]``。
+                Env 已按参考仓库的固定安全范围完成检查。
+            gripper_position: 绝对夹爪位置。
 
         Effects:
-            构造 ARX SDK 的 ``JointState`` 命令并调用 ``set_joint_cmd``。
-            该调用只更新 SDK 内部目标；真正的 CAN 下发由 SDK 后台线程完成。
+            复用预分配的 ARX SDK ``JointState`` 命令并调用
+            ``set_joint_cmd``。真正的 CAN 下发由 SDK 后台线程完成。
 
         Raises:
-            ValueError: 输入形状错误、包含 NaN/Inf 或超出硬件范围。
+            ValueError: 输入形状错误或包含 NaN/Inf。
             RuntimeError: 控制器已经关闭。
         """
 
@@ -355,26 +356,9 @@ class ArxX5JointController:
         if not np.all(np.isfinite(joint_position)) or not np.isfinite(gripper_position):
             raise ValueError("绝对关节命令不能包含 NaN 或 Inf。")
 
-        low = self.joint_position_low
-        high = self.joint_position_high
-        if np.any(joint_position < low) or np.any(joint_position > high):
-            raise ValueError(
-                "绝对关节命令超出 ARX SDK 硬件范围："
-                f"command={joint_position}, low={low}, high={high}。"
-            )
-        if not (
-            self.gripper_position_low <= gripper_position <= self.gripper_position_high
-        ):
-            raise ValueError(
-                "绝对夹爪命令超出范围："
-                f"command={gripper_position}, range="
-                f"[{self.gripper_position_low}, {self.gripper_position_high}]。"
-            )
-
-        command = self._arx5.JointState(self.JOINT_DOF)
-        command.pos()[:] = joint_position
-        command.gripper_pos = float(gripper_position)
-        self._controller.set_joint_cmd(command)
+        self._command_buffer.pos()[:] = joint_position
+        self._command_buffer.gripper_pos = float(gripper_position)
+        self._controller.set_joint_cmd(self._command_buffer)
 
     def set_to_damping(self) -> None:
         """请求 SDK 将机械臂切换到阻尼模式。
@@ -389,21 +373,12 @@ class ArxX5JointController:
     def close(self) -> None:
         """安全关闭控制器，并让底层对象结束后台通信线程。
 
-        函数可以重复调用。第一次调用会先切换阻尼模式，然后释放 pybind
-        控制器对象；SDK 配置的 ``shutdown_to_passive=True`` 会在析构阶段继续
-        保证机械臂进入被动状态。
+        函数可以重复调用。阻尼切换由双臂环境的 disconnect 流程负责；这里
+        只释放 pybind 控制器对象。
         """
 
         if self._closed:
             return
-        try:
-            self._controller.set_to_damping()
-        except Exception as exc:  # 硬件断线时也必须继续释放对象。
-            self._logger.warning(
-                "关闭 ARX 控制器 %s 时切换阻尼模式失败：%s",
-                self.interface_name,
-                exc,
-            )
-        finally:
-            self._closed = True
-            self._controller = None
+        self._closed = True
+        self._controller = None
+        self._command_buffer = None

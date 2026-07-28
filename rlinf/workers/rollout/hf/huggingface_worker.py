@@ -45,6 +45,7 @@ class MultiStepRolloutWorker(Worker):
 
         self.cfg = cfg
         self.should_stop = False
+        self._eval_stop_requested = False
 
         self.only_eval = cfg.runner.get("only_eval", False)
         self.algorithm_cfg = cfg.get("algorithm", {})
@@ -762,11 +763,17 @@ class MultiStepRolloutWorker(Worker):
         if self.enable_offload:
             self.offload_model()
 
+    def request_eval_stop(self) -> None:
+        """Request cooperative termination of the active evaluation loop."""
+
+        self._eval_stop_requested = True
+
     async def evaluate(self, input_channel: Channel, output_channel: Channel):
+        self._eval_stop_requested = False
         if self.enable_offload:
             self.reload_model()
         if self.env_decoupled_mode:
-            while True:
+            while not self._eval_stop_requested:
                 (
                     env_output,
                     split_sizes,
@@ -833,8 +840,13 @@ class MultiStepRolloutWorker(Worker):
                             batch_size=self.eval_batch_size,
                         )
 
-            if self.enable_offload:
-                self.offload_model()
+                    if self._eval_stop_requested:
+                        break
+                if self._eval_stop_requested:
+                    break
+
+        if self.enable_offload:
+            self.offload_model()
 
     def offload_model(self):
         if self.enable_cuda_graph:

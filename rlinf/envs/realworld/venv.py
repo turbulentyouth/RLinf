@@ -74,6 +74,7 @@ class NoAutoResetSyncVectorEnv(SyncVectorEnv):
 def _worker_no_auto_reset(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
     assert shared_memory is None
     env = env_fn()
+    env_closed = False
     parent_pipe.close()
     try:
         while True:
@@ -95,6 +96,8 @@ def _worker_no_auto_reset(index, env_fn, pipe, parent_pipe, shared_memory, error
                 env.seed(data)
                 pipe.send((None, True))
             elif command == "close":
+                env.close()
+                env_closed = True
                 pipe.send((None, True))
                 break
             elif command == "_call":
@@ -127,10 +130,17 @@ def _worker_no_auto_reset(index, env_fn, pipe, parent_pipe, shared_memory, error
                     "`_setattr`, `_check_spaces`}."
                 )
     except (KeyboardInterrupt, Exception):
-        error_queue.put((index,) + sys.exc_info()[:2])
+        error = (index,) + sys.exc_info()[:2]
+        try:
+            env.close()
+        except BaseException:
+            pass
+        env_closed = True
+        error_queue.put(error)
         pipe.send((None, False))
     finally:
-        env.close()
+        if not env_closed:
+            env.close()
 
 
 def _worker_shared_memory_no_auto_reset(
@@ -138,6 +148,7 @@ def _worker_shared_memory_no_auto_reset(
 ):
     assert shared_memory is not None
     env = env_fn()
+    env_closed = False
     observation_space = env.observation_space
     parent_pipe.close()
     try:
@@ -166,6 +177,8 @@ def _worker_shared_memory_no_auto_reset(
                 env.seed(data)
                 pipe.send((None, True))
             elif command == "close":
+                env.close()
+                env_closed = True
                 pipe.send((None, True))
                 break
             elif command == "_call":
@@ -195,10 +208,17 @@ def _worker_shared_memory_no_auto_reset(
                     "`_setattr`, `_check_spaces`}."
                 )
     except (KeyboardInterrupt, Exception):
-        error_queue.put((index,) + sys.exc_info()[:2])
+        error = (index,) + sys.exc_info()[:2]
+        try:
+            env.close()
+        except BaseException:
+            pass
+        env_closed = True
+        error_queue.put(error)
         pipe.send((None, False))
     finally:
-        env.close()
+        if not env_closed:
+            env.close()
 
 
 class NoAutoResetAsyncVectorEnv(AsyncVectorEnv):

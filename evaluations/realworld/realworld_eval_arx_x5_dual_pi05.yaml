@@ -29,8 +29,6 @@ run_modes:
     max_num_steps: 5000
     max_steps_per_rollout_epoch: 5000
     episode_control_enabled: true
-    start_position_enabled: true
-    move_in_hardware_dry_run: false
   hardware_dry_run:
     experiment_name: realworld-eval-arx-x5-dual-pi05-dryrun-hardware
     dry_run: true
@@ -39,8 +37,6 @@ run_modes:
     max_num_steps: 500
     max_steps_per_rollout_epoch: 500
     episode_control_enabled: true
-    start_position_enabled: true
-    move_in_hardware_dry_run: true
   distributed_dry_run:
     experiment_name: realworld-eval-arx-x5-dual-pi05-dryrun-distributed
     dry_run: false
@@ -49,8 +45,6 @@ run_modes:
     max_num_steps: 5
     max_steps_per_rollout_epoch: 50
     episode_control_enabled: false
-    start_position_enabled: false
-    move_in_hardware_dry_run: false
 
 cluster:
   num_nodes: 2
@@ -145,18 +139,17 @@ env:
       max_num_steps: ${run_modes.${run_mode}.max_num_steps}
       step_frequency: 30.0
       start_position:
-        enabled: ${run_modes.${run_mode}.start_position_enabled}
-        move_in_hardware_dry_run: ${run_modes.${run_mode}.move_in_hardware_dry_run}
-        move_on_every_reset: true
         left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
         right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
-        left_gripper: 0.5
-        right_gripper: 0.5
-        duration: 30.0
-        control_frequency: 50.0
-        max_joint_delta: 1.2
-        max_final_error: 0.15
-        max_control_lag: 0.25
+        left_gripper: 1.57
+        right_gripper: 1.57
+        duration: 2.0
+      home_position:
+        left_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        right_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        left_gripper: 0.0
+        right_gripper: 0.0
+        duration: null
 
 rollout:
   group_name: "RolloutGroup"

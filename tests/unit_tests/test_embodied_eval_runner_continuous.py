@@ -37,10 +37,15 @@ class _EnvGroup:
     def __init__(self, evaluate_handle=None):
         self.evaluate_handle = evaluate_handle
         self.close_calls = 0
+        self.stop_calls = 0
 
     def evaluate(self, **kwargs):
         del kwargs
         return self.evaluate_handle
+
+    def request_eval_stop(self):
+        self.stop_calls += 1
+        return _Handle()
 
     def close_envs(self):
         self.close_calls += 1
@@ -50,10 +55,15 @@ class _EnvGroup:
 class _RolloutGroup:
     def __init__(self, evaluate_handle):
         self.evaluate_handle = evaluate_handle
+        self.stop_calls = 0
 
     def evaluate(self, **kwargs):
         del kwargs
         return self.evaluate_handle
+
+    def request_eval_stop(self):
+        self.stop_calls += 1
+        return _Handle()
 
 
 class _MetricLogger:
@@ -114,8 +124,8 @@ def test_continuous_run_stops_on_keyboard_interrupt_and_closes_envs():
     assert runner.env.close_calls == 1
 
 
-def test_evaluate_waits_for_short_cycle_after_manual_interrupt():
-    """An interrupted wait drains the current finite cycle before returning."""
+def test_evaluate_requests_cooperative_stop_after_manual_interrupt():
+    """An interrupted wait stops both workers before draining their handles."""
 
     runner = _runner()
     env_handle = _Handle(results=[{}], interrupt_once=True)
@@ -126,5 +136,7 @@ def test_evaluate_waits_for_short_cycle_after_manual_interrupt():
     with pytest.raises(KeyboardInterrupt):
         runner.evaluate()
 
+    assert runner.env.stop_calls == 1
+    assert runner.rollout.stop_calls == 1
     assert env_handle.wait_calls == 2
     assert rollout_handle.wait_calls == 1

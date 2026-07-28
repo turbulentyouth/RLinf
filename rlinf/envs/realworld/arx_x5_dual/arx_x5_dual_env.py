@@ -17,15 +17,15 @@
 from __future__ import annotations
 
 import copy
-import queue
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-import cv2
 import gymnasium as gym
 import numpy as np
+from PIL import Image
 
 from rlinf.envs.realworld.common.camera import BaseCamera, CameraInfo, create_camera
 from rlinf.scheduler import WorkerInfo
@@ -34,13 +34,20 @@ from rlinf.utils.logging import get_logger
 from .arx_x5_dual_controller import ArxX5JointController
 from .arx_x5_dual_robot_state import ArxX5ArmState
 
-# ARX 官方 X5 配置中的关节范围。真实运行时会重新从 SDK 读取范围；这些值只在
-# is_dummy=True 的无硬件测试中使用，使 dummy 环境和真机环境拥有相同动作语义。
-_X5_JOINT_POSITION_LOW = np.array(
-    [-3.14, -0.05, -0.1, -1.6, -1.57, -2.0], dtype=np.float64
+# Match xense-openpi/examples/bi_arx5_real/real_env.py exactly. The reference
+# checks policy actions against fixed 0.9-scaled joint thresholds and a slightly
+# wider gripper interval before forwarding the unchanged action to the SDK.
+_X5_JOINT_POSITION_MIN_RAW = np.array(
+    [-3.14, -0.05, -0.2, -1.6, -1.57, -2.0], dtype=np.float64
 )
-_X5_JOINT_POSITION_HIGH = np.array([2.618, 3.5, 3.2, 1.55, 1.57, 2.0], dtype=np.float64)
-_X5_GRIPPER_WIDTH = 0.088
+_X5_JOINT_POSITION_MAX_RAW = np.array(
+    [2.618, 3.5, 3.2, 1.55, 1.57, 2.0], dtype=np.float64
+)
+_X5_SAFETY_FACTOR = 0.9
+_X5_JOINT_POSITION_LOW = _X5_JOINT_POSITION_MIN_RAW * _X5_SAFETY_FACTOR
+_X5_JOINT_POSITION_HIGH = _X5_JOINT_POSITION_MAX_RAW * _X5_SAFETY_FACTOR
+_X5_GRIPPER_POSITION_LOW = -0.1
+_X5_GRIPPER_POSITION_HIGH = 1.8
 
 # 三个名称同时承担两层职责：
 # 1. 它们是 Env 原始 observation["frames"] 中的键；
@@ -56,62 +63,65 @@ _CAMERA_NAMES = (
 
 
 @dataclass
-class ArxX5DualStartPositionConfig:
-    """首次推理前的双臂安全起始位配置。"""
+class ArxX5DualPositionConfig:
+    """Synchronized dual-arm target used by the reference trajectory helpers."""
 
-    enabled: bool = False
-    move_in_hardware_dry_run: bool = False
-    move_on_every_reset: bool = False
+    left_joints: list[float] = field(default_factory=lambda: [0.0] * 6)
+    right_joints: list[float] = field(default_factory=lambda: [0.0] * 6)
+    left_gripper: Optional[float] = None
+    right_gripper: Optional[float] = None
+    duration: float | None = 2.0
+
+    def __post_init__(self) -> None:
+        """Validate target shapes using the same six-or-seven-value semantics."""
+
+        for name in ("left_joints", "right_joints"):
+            value = np.asarray(getattr(self, name), dtype=np.float64)
+            if value.shape != (6,) or not np.all(np.isfinite(value)):
+                raise ValueError(f"{name} must be a finite six-dimensional array.")
+            setattr(self, name, value.tolist())
+        for name in ("left_gripper", "right_gripper"):
+            value = getattr(self, name)
+            if value is not None and not np.isfinite(value):
+                raise ValueError(f"{name} must be finite or null.")
+        if self.duration is not None and not np.isfinite(self.duration):
+            raise ValueError("duration must be finite or null.")
+
+
+@dataclass
+class ArxX5DualStartPositionConfig(ArxX5DualPositionConfig):
+    """Reference start pose, executed during connect and every reset."""
+
     left_joints: list[float] = field(
         default_factory=lambda: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
     )
     right_joints: list[float] = field(
         default_factory=lambda: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
     )
-    left_gripper: Optional[float] = None
-    right_gripper: Optional[float] = None
-    duration: float = 30.0
-    control_frequency: float = 50.0
-    max_joint_delta: float = 1.2
-    max_final_error: float = 0.15
-    max_control_lag: float = 0.25
+    left_gripper: Optional[float] = 1.57
+    right_gripper: Optional[float] = 1.57
 
-    def __post_init__(self) -> None:
-        """检查目标形状和运动安全参数。"""
 
-        for name in ("left_joints", "right_joints"):
-            value = np.asarray(getattr(self, name), dtype=np.float64)
-            if value.shape != (6,) or not np.all(np.isfinite(value)):
-                raise ValueError(f"start_position.{name} 必须是有限的 6 维数组。")
-            setattr(self, name, value.tolist())
-        for name in ("left_gripper", "right_gripper"):
-            value = getattr(self, name)
-            if value is not None and not np.isfinite(value):
-                raise ValueError(f"start_position.{name} 必须是有限数值或 null。")
-        if self.duration <= 0:
-            raise ValueError("start_position.duration 必须大于 0。")
-        if self.control_frequency <= 0:
-            raise ValueError("start_position.control_frequency 必须大于 0。")
-        if self.max_joint_delta <= 0:
-            raise ValueError("start_position.max_joint_delta 必须大于 0。")
-        if self.max_final_error < 0:
-            raise ValueError("start_position.max_final_error 不能小于 0。")
-        if self.max_control_lag <= 0:
-            raise ValueError("start_position.max_control_lag 必须大于 0。")
+@dataclass
+class ArxX5DualHomePositionConfig(ArxX5DualPositionConfig):
+    """Reference all-zero home pose used by disconnect."""
+
+    left_gripper: Optional[float] = 0.0
+    right_gripper: Optional[float] = 0.0
+    duration: float | None = None
 
 
 @dataclass
 class ArxX5DualRobotConfig:
     """ARX X5 双臂绝对关节位置环境配置。
 
-    这个配置只描述当前第一版闭环需要的内容：两条机械臂、三个 RGB 相机、
-    14 维绝对关节动作以及基本安全限制。遥操作、自动回零和任务奖励不属于
-    当前版本，后续需要时再独立增加，避免把动作链路和任务逻辑混在一起。
+    这个配置描述两条机械臂、三个 RGB 相机、14 维绝对关节动作、每次 reset
+    的平滑起始位，以及退出前的平滑回零。
 
     Attributes:
         robot_model: 左右臂共同使用的 ARX 型号，当前应为 ``"X5"``。
-        left_interface: 左臂 Linux CAN 接口，例如 ``"can0"``。
-        right_interface: 右臂 Linux CAN 接口，例如 ``"can1"``。
+        left_interface: 左臂 Linux CAN 接口，参考默认为 ``"can1"``。
+        right_interface: 右臂 Linux CAN 接口，参考默认为 ``"can3"``。
         head_camera_serial: 头部相机序列号。该相机作为 π0.5 主视角。
         left_wrist_camera_serial: 左腕相机序列号。
         right_wrist_camera_serial: 右腕相机序列号。
@@ -127,29 +137,25 @@ class ArxX5DualRobotConfig:
         controller_warmup_time: 创建控制器后等待首批真实反馈的时间，单位为秒。
         command_preview_time: SDK 对新绝对关节目标做插值的预览时间。参考项目
             使用 0.03 秒。
-        joint_velocity_limit_scale: SDK 原始关节速度上限缩放比例。
         kp_scale: 对 SDK 默认关节 ``kp`` 的缩放比例。参考项目使用 0.5。
         kd_scale: 对 SDK 默认关节 ``kd`` 的缩放比例。参考项目使用 1.5。
-        joint_limit_margin_ratio: 从关节硬限位两端各缩进的比例。例如 0.05
-            表示只使用中间 90% 的关节范围。
-        max_joint_delta_per_step: 每个 Env step 允许的最大关节变化，单位弧度。
-            π0.5 输出仍然是绝对位置；这里仅将过大的单步变化截断成安全目标。
+        interpolation_controller_dt: 双臂平滑轨迹的高层插值周期。参考项目
+            使用 0.02 秒（50 Hz）。
         step_frequency: RLinf Env 的目标执行频率。它低于 SDK 后台控制频率。
         max_num_steps: 一条 rollout 最多执行多少个 Env step。
         task_description: 发送给 π0.5 的语言任务指令。
         skip_interface_check: 为 True 时跳过 Linux CAN 接口存在性与 UP 状态检查。
             仅在特殊调试场景下使用，正常运行应保持 False。
-        dry_run: 为 True 时连接机械臂和相机并读取真实观测，但控制器保持阻尼
-            模式，模型动作只记录和校验。若 start position 明确允许在 hardware
-            dry-run 中移动，则只在首次推理前发送受保护的初始化命令，随后重新
-            进入阻尼模式；模型动作仍绝不调用 ``set_joint_cmd``。
+        dry_run: 为 True 时仍按参考流程完成 SDK 回零、start 和普通位置控制，
+            但模型动作只记录，不调用 ``set_joint_cmd``。
         is_dummy: 为 True 时不连接机械臂和相机，使用零图像和内存状态测试链路。
-        start_position: 首次模型推理前的双臂关节目标和安全运动参数。
+        start_position: 每次 reset 执行的参考双臂起始位。
+        home_position: 环境关闭前必定执行的双臂回零目标。
     """
 
     robot_model: str = "X5"
-    left_interface: str = "can0"
-    right_interface: str = "can1"
+    left_interface: str = "can1"
+    right_interface: str = "can3"
 
     head_camera_serial: Optional[str] = None
     left_wrist_camera_serial: Optional[str] = None
@@ -160,17 +166,15 @@ class ArxX5DualRobotConfig:
     right_wrist_camera_type: Optional[str] = None
     image_height: int = 224
     image_width: int = 224
-    camera_frame_timeout: float = 0.5
+    camera_frame_timeout: float = 0.2
 
     controller_dt: float = 0.002
     controller_warmup_time: float = 0.5
     command_preview_time: float = 0.03
-    joint_velocity_limit_scale: float = 0.2
+    interpolation_controller_dt: float = 0.02
     kp_scale: float = 0.5
     kd_scale: float = 1.5
-    joint_limit_margin_ratio: float = 0.05
-    max_joint_delta_per_step: float = 0.1
-    step_frequency: float = 10.0
+    step_frequency: float = 30.0
     max_num_steps: int = 300
     task_description: str = ""
     skip_interface_check: bool = False
@@ -178,6 +182,9 @@ class ArxX5DualRobotConfig:
     is_dummy: bool = False
     start_position: ArxX5DualStartPositionConfig | dict[str, Any] = field(
         default_factory=ArxX5DualStartPositionConfig
+    )
+    home_position: ArxX5DualHomePositionConfig | dict[str, Any] = field(
+        default_factory=ArxX5DualHomePositionConfig
     )
 
     def __post_init__(self) -> None:
@@ -187,6 +194,10 @@ class ArxX5DualRobotConfig:
             self.start_position = ArxX5DualStartPositionConfig(**self.start_position)
         elif not isinstance(self.start_position, ArxX5DualStartPositionConfig):
             raise TypeError("start_position 必须是配置映射。")
+        if isinstance(self.home_position, dict):
+            self.home_position = ArxX5DualHomePositionConfig(**self.home_position)
+        elif not isinstance(self.home_position, ArxX5DualHomePositionConfig):
+            raise TypeError("home_position 必须是配置映射。")
 
         if self.left_interface == self.right_interface:
             raise ValueError("左右机械臂必须使用不同的 CAN 接口。")
@@ -200,16 +211,12 @@ class ArxX5DualRobotConfig:
             raise ValueError("controller_warmup_time 不能小于 0。")
         if self.command_preview_time <= 0:
             raise ValueError("command_preview_time 必须大于 0。")
-        if not 0 < self.joint_velocity_limit_scale <= 1:
-            raise ValueError("joint_velocity_limit_scale 必须位于 (0, 1]。")
         if self.kp_scale <= 0:
             raise ValueError("kp_scale 必须大于 0。")
         if self.kd_scale <= 0:
             raise ValueError("kd_scale 必须大于 0。")
-        if not 0 <= self.joint_limit_margin_ratio < 0.5:
-            raise ValueError("joint_limit_margin_ratio 必须位于 [0, 0.5)。")
-        if self.max_joint_delta_per_step <= 0:
-            raise ValueError("max_joint_delta_per_step 必须大于 0。")
+        if self.interpolation_controller_dt <= 0:
+            raise ValueError("interpolation_controller_dt 必须大于 0。")
         if self.step_frequency <= 0:
             raise ValueError("step_frequency 必须大于 0。")
         if self.max_num_steps <= 0:
@@ -275,8 +282,9 @@ class ArxX5DualEnv(gym.Env):
             env_idx: 当前环境编号，用于日志定位。
 
         Effects:
-            真实模式下会立即创建两个 ARX SDK 后台线程并打开三路相机；硬件
-            dry-run 保持控制器处于阻尼模式；dummy 模式只创建内存状态和零图像。
+            真实模式和 hardware dry-run 都严格执行参考 connect 流程：创建双臂、
+            SDK 回零、相机连接、平滑到 start、恢复普通位置控制。dummy 模式只
+            创建内存状态和零图像。
         """
 
         del hardware_info
@@ -285,39 +293,32 @@ class ArxX5DualEnv(gym.Env):
         self._logger = get_logger()
         self._task_description = self.config.task_description
         self._num_steps = 0
-        self._start_position_initialized = False
         self.node_rank = worker_info.cluster_node_rank if worker_info else 0
         self.worker_rank = worker_info.rank if worker_info else 0
         self._closed = False
 
         self._left_state = ArxX5ArmState()
         self._right_state = ArxX5ArmState()
-        self._last_camera_frame: dict[str, np.ndarray] = {}
         self._cameras: list[BaseCamera] = []
 
         if self.config.is_dummy:
-            self._set_dummy_limits()
+            self._set_reference_action_limits()
         else:
             self._setup_hardware()
             if self.config.dry_run:
-                if self.config.start_position.enabled and (
-                    self.config.start_position.move_in_hardware_dry_run
-                ):
-                    self._logger.warning(
-                        "ARX hardware dry-run 已启用：首次 reset 会执行一次受保护的 "
-                        "start position 移动；随后恢复阻尼模式，模型动作不会发送。"
-                    )
-                else:
-                    self._logger.warning(
-                        "ARX hardware dry-run 已启用：读取真实状态和相机，"
-                        "不会发送任何动作命令。"
-                    )
+                self._logger.warning(
+                    "ARX hardware dry-run 已启用：仍执行真实 connect/reset/start/home，"
+                    "但不会发送模型动作。"
+                )
 
         self._init_action_observation_spaces()
 
         if not self.config.is_dummy:
             self._open_cameras()
-            self._read_robot_state()
+            # BiARX5.connect(go_to_start=True) performs one start motion before the
+            # runtime issues its first episode reset, which performs it again.
+            self._smooth_go_start()
+            self._enable_dual_position_control()
 
     @property
     def task_description(self) -> str:
@@ -325,13 +326,17 @@ class ArxX5DualEnv(gym.Env):
 
         return self._task_description
 
-    def _set_dummy_limits(self) -> None:
-        """为无硬件测试设置与 X5 真机一致的默认动作范围。"""
+    def _set_reference_action_limits(self) -> None:
+        """Install the fixed policy-action thresholds from xense-openpi."""
 
         self._joint_position_low = np.stack([_X5_JOINT_POSITION_LOW] * 2)
         self._joint_position_high = np.stack([_X5_JOINT_POSITION_HIGH] * 2)
-        self._gripper_position_low = np.zeros(2, dtype=np.float64)
-        self._gripper_position_high = np.full(2, _X5_GRIPPER_WIDTH, dtype=np.float64)
+        self._gripper_position_low = np.full(
+            2, _X5_GRIPPER_POSITION_LOW, dtype=np.float64
+        )
+        self._gripper_position_high = np.full(
+            2, _X5_GRIPPER_POSITION_HIGH, dtype=np.float64
+        )
 
     @staticmethod
     def _check_can_interface(interface: str) -> None:
@@ -354,11 +359,7 @@ class ArxX5DualEnv(gym.Env):
             raise RuntimeError(f"CAN 接口 {interface!r} 存在但未 UP。")
 
     def _setup_hardware(self) -> None:
-        """连接左右机械臂，并从 SDK 获取真实关节和夹爪范围。
-
-        关节安全边界不是简单地将上下限乘一个系数，而是从完整范围的两端各
-        缩进 ``joint_limit_margin_ratio``。这种算法对负数下限和正数上限都成立。
-        """
+        """Create both controllers and run the reference SDK home sequence."""
 
         if not self.config.skip_interface_check:
             self._check_can_interface(self.config.left_interface)
@@ -369,63 +370,27 @@ class ArxX5DualEnv(gym.Env):
             interface_name=self.config.left_interface,
             controller_dt=self.config.controller_dt,
             preview_time=self.config.command_preview_time,
-            joint_velocity_limit_scale=self.config.joint_velocity_limit_scale,
         )
+        time.sleep(self.config.controller_warmup_time)
         try:
             self._right_controller = ArxX5JointController(
                 model=self.config.robot_model,
                 interface_name=self.config.right_interface,
                 controller_dt=self.config.controller_dt,
                 preview_time=self.config.command_preview_time,
-                joint_velocity_limit_scale=self.config.joint_velocity_limit_scale,
             )
+            time.sleep(self.config.controller_warmup_time)
+            self._left_controller.reset_to_home()
+            self._right_controller.reset_to_home()
+            self._set_dual_gravity_compensation()
         except Exception:
             self._left_controller.close()
+            controller = getattr(self, "_right_controller", None)
+            if controller is not None:
+                controller.close()
             raise
 
-        # hardware dry-run 默认保持 SDK 的阻尼/被动模式；若配置允许初始化移动，
-        # reset() 会短暂启用位置控制，移动完成后立即恢复阻尼模式。
-        if not self.config.dry_run:
-            try:
-                self._enable_dual_position_control()
-            except Exception:
-                self._left_controller.close()
-                self._right_controller.close()
-                raise
-
-        raw_low = np.stack(
-            [
-                self._left_controller.joint_position_low,
-                self._right_controller.joint_position_low,
-            ]
-        )
-        raw_high = np.stack(
-            [
-                self._left_controller.joint_position_high,
-                self._right_controller.joint_position_high,
-            ]
-        )
-        margin = (raw_high - raw_low) * self.config.joint_limit_margin_ratio
-        self._joint_position_low = raw_low + margin
-        self._joint_position_high = raw_high - margin
-        self._gripper_position_low = np.array(
-            [
-                self._left_controller.gripper_position_low,
-                self._right_controller.gripper_position_low,
-            ],
-            dtype=np.float64,
-        )
-        self._gripper_position_high = np.array(
-            [
-                self._left_controller.gripper_position_high,
-                self._right_controller.gripper_position_high,
-            ],
-            dtype=np.float64,
-        )
-
-        # ARX SDK 的 CAN 收发运行在后台线程中。显式等待首批反馈，避免 Env
-        # 把控制器刚创建时的默认零数组误当成机械臂真实起始关节位置。
-        time.sleep(self.config.controller_warmup_time)
+        self._set_reference_action_limits()
 
     def _init_action_observation_spaces(self) -> None:
         """定义 π0.5 动作与 Env observation 的固定形状。
@@ -517,26 +482,32 @@ class ArxX5DualEnv(gym.Env):
         ]
 
     def _open_cameras(self) -> None:
-        """打开头部、左腕和右腕三路相机。
-
-        Effects:
-            三个相机对象按 ``头部、左腕、右腕`` 顺序保存。若任意一路创建或
-            启动失败，会关闭此前已经打开的相机和两个机械臂控制器，避免构造
-            Env 失败后仍残留相机线程或 CAN 后台线程。
-
-        Raises:
-            Exception: 保留并重新抛出相机后端产生的原始异常。
-        """
+        """Create and open all configured cameras in parallel like BiARX5."""
 
         try:
-            for camera_info in self._camera_specs():
-                camera = create_camera(camera_info)
-                # 先保存再 open，使 open() 中途失败时 close() 也能释放设备。
-                self._cameras.append(camera)
-                camera.open()
+            specs = self._camera_specs()
+            with ThreadPoolExecutor(max_workers=min(len(specs), 8)) as executor:
+                self._cameras = list(executor.map(create_camera, specs))
+                futures = [executor.submit(camera.open) for camera in self._cameras]
+                for future in futures:
+                    future.result()
         except Exception:
             self.close()
             raise
+
+    def _close_cameras_parallel(self) -> None:
+        """Close all cameras in parallel before destroying arm controllers."""
+
+        if not self._cameras:
+            return
+        with ThreadPoolExecutor(max_workers=min(len(self._cameras), 8)) as executor:
+            futures = [executor.submit(camera.close) for camera in self._cameras]
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as exc:
+                    self._logger.warning("Failed to close camera: %s", exc)
+        self._cameras = []
 
     @staticmethod
     def _validate_camera_frame(name: str, frame: Any) -> np.ndarray:
@@ -581,28 +552,19 @@ class ArxX5DualEnv(gym.Env):
 
         height, width = image.shape[:2]
         if (height, width) == (target_height, target_width):
-            return image.copy()
+            return image
 
-        scale = min(target_width / width, target_height / height)
-        resized_width = max(1, int(width * scale))
-        resized_height = max(1, int(height * scale))
-        resized = cv2.resize(
-            image,
-            (resized_width, resized_height),
-            interpolation=cv2.INTER_LINEAR,
+        ratio = max(width / target_width, height / target_height)
+        resized_height = int(height / ratio)
+        resized_width = int(width / ratio)
+        resized = Image.fromarray(image).resize(
+            (resized_width, resized_height), resample=Image.Resampling.BILINEAR
         )
-
-        padded = np.zeros(
-            (target_height, target_width, image.shape[2]),
-            dtype=image.dtype,
-        )
-        start_x = (target_width - resized_width) // 2
-        start_y = (target_height - resized_height) // 2
-        padded[
-            start_y : start_y + resized_height,
-            start_x : start_x + resized_width,
-        ] = resized
-        return padded
+        padded = Image.new(resized.mode, (target_width, target_height), 0)
+        pad_height = max(0, int((target_height - resized_height) / 2))
+        pad_width = max(0, int((target_width - resized_width) / 2))
+        padded.paste(resized, (pad_width, pad_height))
+        return np.asarray(padded)
 
     def _read_camera_frames(self) -> dict[str, np.ndarray]:
         """同步读取三路相机，并转换成 π0.5 所需的 RGB 图像。
@@ -618,23 +580,13 @@ class ArxX5DualEnv(gym.Env):
 
         Notes:
             RLinf 相机后端输出 BGR。函数先转成 RGB，再按照 xense-openpi 的
-            BiARX5 推理方式保持宽高比缩放并补黑边。如果运行中偶发超时，会
-            使用该相机上一张成功图像，避免单路相机抖动直接中断 rollout。
+            BiARX5 推理方式保持宽高比缩放并补黑边。
         """
 
         frames: dict[str, np.ndarray] = {}
         for camera in self._cameras:
             name = camera.name
-            try:
-                frame = camera.get_frame(timeout=self.config.camera_frame_timeout)
-                self._last_camera_frame[name] = frame
-            except queue.Empty:
-                frame = self._last_camera_frame.get(name)
-                if frame is None:
-                    raise RuntimeError(
-                        f"相机 {name!r} 读取超时，且没有可回退的历史图像。"
-                    )
-                self._logger.warning("相机 %s 读取超时，本 step 使用上一帧。", name)
+            frame = camera.get_frame(timeout=self.config.camera_frame_timeout)
 
             frame = self._validate_camera_frame(name, frame)
             # 当前 π0.5 只使用 RGB；如果相机后端额外附带深度通道，仅取前三个
@@ -706,71 +658,68 @@ class ArxX5DualEnv(gym.Env):
         }
         return copy.deepcopy(observation)
 
-    def _limit_absolute_action(self, action: np.ndarray) -> np.ndarray:
-        """对 π0.5 的绝对动作执行空间裁剪和单步变化限制。
+    def _check_action_safety(self, action: np.ndarray) -> tuple[bool, str]:
+        """Apply the fixed action checks from xense-openpi without clipping."""
 
-        Args:
-            action: 已确认形状为 ``(14,)`` 且数值有限的 π0.5 原始输出。
+        for side, joint_slice in (("Left", slice(0, 6)), ("Right", slice(7, 13))):
+            for index, (value, minimum, maximum) in enumerate(
+                zip(
+                    action[joint_slice],
+                    _X5_JOINT_POSITION_LOW,
+                    _X5_JOINT_POSITION_HIGH,
+                    strict=True,
+                )
+            ):
+                if value < minimum or value > maximum:
+                    return (
+                        False,
+                        f"{side} joint {index + 1} out of range: {value:.4f} "
+                        f"not in [{minimum:.4f}, {maximum:.4f}]",
+                    )
 
-        Returns:
-            仍然是绝对关节位置语义的 14 维动作。关节目标先被裁剪到安全动作
-            空间，再限制为当前关节位置正负 ``max_joint_delta_per_step``。
-            夹爪只做合法宽度裁剪，不转换为 delta。
-        """
-
-        limited = np.clip(action, self.action_space.low, self.action_space.high)
-        current = self._compose_absolute_joint_state().astype(np.float64)
-        max_delta = self.config.max_joint_delta_per_step
-        for joint_slice in (slice(0, 6), slice(7, 13)):
-            limited[joint_slice] = np.clip(
-                limited[joint_slice],
-                current[joint_slice] - max_delta,
-                current[joint_slice] + max_delta,
-            )
-        return limited.astype(np.float64)
+        for side, index in (("Left", 6), ("Right", 13)):
+            value = action[index]
+            if value < _X5_GRIPPER_POSITION_LOW or value > _X5_GRIPPER_POSITION_HIGH:
+                return (
+                    False,
+                    f"{side} gripper out of range: {value:.4f} not in "
+                    f"[{_X5_GRIPPER_POSITION_LOW}, {_X5_GRIPPER_POSITION_HIGH}]",
+                )
+        return True, ""
 
     def _send_absolute_action(self, action: np.ndarray) -> None:
-        """把 14 维绝对动作拆成左右臂命令并交给 ARX SDK。
+        """Forward one unchanged reference-format action to both SDK controllers."""
 
-        Args:
-            action: 经过安全限制后的 14 维绝对动作，顺序固定为
-                ``[左6关节, 左夹爪, 右6关节, 右夹爪]``。
-
-        Effects:
-            分别调用左右控制器的 ``set_joint_cmd``。如果任意一条机械臂发送
-            失败，立即尝试让两条机械臂都进入阻尼模式，然后把异常抛给上层。
-        """
-
-        try:
-            self._left_controller.send_absolute_joint_position(action[:6], action[6])
-            self._right_controller.send_absolute_joint_position(
-                action[7:13], action[13]
-            )
-        except Exception:
-            self._enter_damping_after_error()
-            raise
+        self._left_controller.send_absolute_joint_position(action[:6], action[6])
+        self._right_controller.send_absolute_joint_position(action[7:13], action[13])
 
     def _enable_dual_position_control(self) -> None:
-        """为左右臂启用相同的位置环增益，失败时恢复阻尼模式。"""
+        """Restore the reference repository's ordinary joint-position gains."""
 
-        self._left_controller.enable_position_control(
+        self._left_controller.set_to_normal_position_control(
             kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
         )
-        try:
-            self._right_controller.enable_position_control(
-                kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
-            )
-        except Exception:
-            self._left_controller.set_to_damping()
-            raise
+        self._right_controller.set_to_normal_position_control(
+            kp_scale=self.config.kp_scale, kd_scale=self.config.kd_scale
+        )
 
-    def _move_to_start_position(self) -> None:
-        """按余弦插值将双臂移动到 YAML 配置的首次推理起始位。"""
+    def _set_dual_gravity_compensation(self) -> None:
+        """Switch both reference-mode trackers to gravity compensation."""
 
-        cfg = self.config.start_position
-        self._read_robot_state()
+        self._left_controller.set_to_gravity_compensation()
+        self._right_controller.set_to_gravity_compensation()
+
+    def _hold_dual_current_position(self) -> None:
+        """Seed both SDK interpolators with their measured joint positions."""
+
+        self._left_controller.hold_current_position()
+        self._right_controller.hold_current_position()
+
+    def _build_position_target(self, cfg: ArxX5DualPositionConfig) -> np.ndarray:
+        """Build the 14D target while holding unspecified gripper positions."""
+
         current = self._compose_absolute_joint_state().astype(np.float64)
-        target = np.concatenate(
+        return np.concatenate(
             [
                 np.asarray(cfg.left_joints, dtype=np.float64),
                 np.asarray(
@@ -783,102 +732,74 @@ class ArxX5DualEnv(gym.Env):
             ]
         )
 
-        if not self.action_space.contains(target.astype(np.float32)):
-            raise ValueError(
-                "start position 超出缩进后的安全动作范围："
-                f"target={target}, low={self.action_space.low}, "
-                f"high={self.action_space.high}。"
+    def _move_to_position(
+        self, cfg: ArxX5DualPositionConfig, *, position_name: str
+    ) -> None:
+        """Run the reference 50 Hz synchronized ease-in-out trajectory."""
+
+        if cfg.duration is None:
+            self._read_robot_state()
+            initial = self._compose_absolute_joint_state().astype(np.float64)
+            initial_target = self._build_position_target(cfg)
+            joint_indices = np.r_[0:6, 7:13]
+            max_position_error = float(
+                np.max(np.abs(initial_target[joint_indices] - initial[joint_indices]))
             )
-        joint_indices = np.r_[0:6, 7:13]
-        max_delta = float(
-            np.max(np.abs(target[joint_indices] - current[joint_indices]))
-        )
-        if max_delta > cfg.max_joint_delta:
-            raise ValueError(
-                f"start position 最大关节变化 {max_delta:.3f} rad 超过 "
-                f"max_joint_delta={cfg.max_joint_delta:.3f} rad。"
-            )
+            duration = max(max_position_error, 1.0) * 2.0
+        else:
+            duration = float(cfg.duration)
 
-        for side, controller, joint_slice, gripper_idx, gripper_target in (
-            ("left", self._left_controller, slice(0, 6), 6, cfg.left_gripper),
-            ("right", self._right_controller, slice(7, 13), 13, cfg.right_gripper),
-        ):
-            required_velocity = (
-                np.abs(target[joint_slice] - current[joint_slice]) / cfg.duration
-            )
-            if np.any(required_velocity > controller.joint_velocity_limit):
-                raise ValueError(
-                    f"{side} start position 所需关节速度 {required_velocity} "
-                    f"超过安全上限 {controller.joint_velocity_limit}。"
-                )
-            if gripper_target is not None:
-                gripper_velocity = (
-                    abs(target[gripper_idx] - current[gripper_idx]) / cfg.duration
-                )
-                if gripper_velocity > controller.gripper_velocity_limit:
-                    raise ValueError(
-                        f"{side} start position 所需夹爪速度 {gripper_velocity:.4f} "
-                        f"超过安全上限 {controller.gripper_velocity_limit:.4f}。"
-                    )
+        self._hold_dual_current_position()
+        self._enable_dual_position_control()
 
-        steps = max(1, int(np.ceil(cfg.duration * cfg.control_frequency)))
-        motion_start = time.monotonic()
-        for step in range(1, steps + 1):
-            ratio = step / steps
-            alpha = 0.5 - 0.5 * np.cos(np.pi * ratio)
-            self._send_absolute_action(current + alpha * (target - current))
-
-            deadline = motion_start + step / cfg.control_frequency
-            lag = time.monotonic() - deadline
-            if lag > cfg.max_control_lag:
-                raise RuntimeError(
-                    f"start position 控制循环落后 {lag:.3f} 秒，超过 "
-                    f"max_control_lag={cfg.max_control_lag:.3f} 秒。"
-                )
-            time.sleep(max(0.0, deadline - time.monotonic()))
-
-        time.sleep(self.config.command_preview_time + 1.0 / cfg.control_frequency)
+        # move_joint_trajectory fetches feedback again after the mode transition.
         self._read_robot_state()
-        actual = self._compose_absolute_joint_state().astype(np.float64)
-        max_error = float(np.max(np.abs(actual[joint_indices] - target[joint_indices])))
-        if max_error > cfg.max_final_error:
-            raise RuntimeError(
-                f"start position 最终关节误差 {max_error:.3f} rad 超过 "
-                f"max_final_error={cfg.max_final_error:.3f} rad。"
-            )
-        self._logger.info(
-            "双臂已移动到 start position：target=%s, actual=%s",
-            np.array2string(target, precision=6, separator=", "),
-            np.array2string(actual, precision=6, separator=", "),
-        )
-
-    def _maybe_move_to_start_position(self) -> None:
-        """按配置在首次或每次 reset 时执行起始位移动。"""
-
-        cfg = self.config.start_position
-        if (
-            (self._start_position_initialized and not cfg.move_on_every_reset)
-            or self.config.is_dummy
-            or not cfg.enabled
-            or (self.config.dry_run and not cfg.move_in_hardware_dry_run)
-        ):
-            return
-
-        enabled_for_dry_run = self.config.dry_run
+        current = self._compose_absolute_joint_state().astype(np.float64)
+        target = self._build_position_target(cfg)
+        controller_dt = self.config.interpolation_controller_dt
         try:
-            if enabled_for_dry_run:
-                self._enable_dual_position_control()
-            self._move_to_start_position()
-            self._start_position_initialized = True
-        except Exception:
-            self._enter_damping_after_error()
-            raise
-        finally:
-            if enabled_for_dry_run:
-                self._enter_damping_after_error()
+            if duration <= 0:
+                self._send_absolute_action(target)
+                return
+
+            steps = max(1, int(np.ceil(duration / controller_dt)))
+            for step in range(1, steps + 1):
+                progress = step / steps
+                doubled_progress = progress * 2.0
+                if doubled_progress < 1.0:
+                    ratio = doubled_progress * doubled_progress / 2.0
+                else:
+                    doubled_progress -= 1.0
+                    ratio = -(doubled_progress * (doubled_progress - 2.0) - 1.0) / 2.0
+                self._send_absolute_action(current + (target - current) * ratio)
+                time.sleep(controller_dt)
+        except KeyboardInterrupt:
+            self._logger.warning(
+                "%s trajectory interrupted by user. Holding current pose.",
+                position_name,
+            )
+
+    def _smooth_go_start(self) -> None:
+        """Match BiARX5.smooth_go_start(duration=2.0)."""
+
+        if self.config.is_dummy:
+            return
+        self._move_to_position(
+            self.config.start_position, position_name="Start position"
+        )
+        self._logger.info("Successfully reached the BiARX5 start position")
+
+    def _smooth_go_home(self) -> None:
+        """Match BiARX5.smooth_go_home() including the final gravity mode."""
+
+        self._move_to_position(self.config.home_position, position_name="Home position")
+        self._set_dual_gravity_compensation()
+        self._logger.info(
+            "Successfully returned home and switched to gravity compensation"
+        )
 
     def _enter_damping_after_error(self) -> None:
-        """在部分发送失败时尽力把左右臂同时切换到阻尼模式。"""
+        """Best-effort reference fallback used for interrupted disconnect."""
 
         for label, controller in (
             ("left", getattr(self, "_left_controller", None)),
@@ -889,78 +810,37 @@ class ArxX5DualEnv(gym.Env):
             try:
                 controller.set_to_damping()
             except Exception as exc:
-                self._logger.error("%s 臂切换阻尼模式失败：%s", label, exc)
+                self._logger.error("%s arm failed to enter damping: %s", label, exc)
 
     def reset(self, *, seed=None, options=None):
-        """开始一条新 rollout，并按配置执行一次首次起始位移动。
-
-        Args:
-            seed: Gym 标准随机种子。真机状态不是随机生成，因此当前未使用。
-            options: Gym 标准 reset 选项。当前版本未定义额外选项。
-
-        Returns:
-            ``(observation, info)``。observation 含三路图像和当前 14 维状态，
-            info 当前为空字典。
-
-        Effects:
-            清零 episode step 计数。若 YAML 启用了 start position，则仅在环境
-            生命周期内第一次 reset 时执行受限插值移动；后续持续推理周期只读取
-            当前状态，不会反复回到起始位。
-        """
+        """Run smooth_go_start on every real-hardware episode reset."""
 
         del seed, options
         self._num_steps = 0
         if not self.config.is_dummy:
-            self._maybe_move_to_start_position()
+            self._smooth_go_start()
             self._read_robot_state()
         return self._get_observation(), {}
 
     def step(self, action: np.ndarray):
-        """执行一次“π0.5 observation -> action -> ARX”的闭环。
-
-        Args:
-            action: π0.5 输出的 14 维绝对动作，顺序为
-                ``[左 q1..q6, 左夹爪, 右 q1..q6, 右夹爪]``。
-
-        Returns:
-            Gymnasium 标准五元组：
-
-            - ``observation``：执行后重新读取的三路 RGB 图像和 14 维状态；
-            - ``reward``：当前动作桥接版本固定为 0.0；
-            - ``terminated``：当前没有任务成功判断，固定为 False；
-            - ``truncated``：达到 ``max_num_steps`` 时为 True；
-            - ``info``：记录请求动作、安全限制后的候选动作及是否真实发送。
-
-        Effects:
-            正式模式向左右 ARX 控制器下发绝对目标；hardware dry-run 只读取
-            真实状态和图像，不发送动作；dummy 模式只更新内存状态。每一步都会
-            记录模型原始动作和经过安全限制的候选动作。
-
-        Raises:
-            ValueError: action 不是 ``(14,)``，或包含 NaN/Inf。
-            RuntimeError: ARX SDK 下发或状态读取失败。
-        """
+        """Validate and execute one unchanged 14D absolute BiARX5 action."""
 
         start_time = time.monotonic()
         requested_action = np.asarray(action, dtype=np.float64)
         if requested_action.shape != (self.ACTION_DIM,):
             raise ValueError(
-                f"ARX 双臂 action 必须是 ({self.ACTION_DIM},)，"
-                f"实际收到 {requested_action.shape}。"
+                f"ARX dual-arm action must be ({self.ACTION_DIM},), "
+                f"got {requested_action.shape}."
             )
         if not np.all(np.isfinite(requested_action)):
-            raise ValueError("π0.5 action 不能包含 NaN 或 Inf。")
+            raise ValueError("ARX dual-arm action cannot contain NaN or Inf.")
 
-        executed_action = self._limit_absolute_action(requested_action.copy())
-        self._logger.info(
-            "π0.5 生成的 14 维绝对动作：requested_action=%s, limited_action=%s",
-            np.array2string(
-                requested_action, precision=6, separator=", ", max_line_width=1000
-            ),
-            np.array2string(
-                executed_action, precision=6, separator=", ", max_line_width=1000
-            ),
-        )
+        if not self.config.dry_run:
+            is_safe, error_message = self._check_action_safety(requested_action)
+            if not is_safe:
+                raise ValueError(f"Unsafe action detected: {error_message}")
+        executed_action = requested_action.copy()
+
         action_sent = False
         if self.config.is_dummy:
             self._left_state.joint_position = executed_action[:6].copy()
@@ -968,23 +848,27 @@ class ArxX5DualEnv(gym.Env):
             self._right_state.joint_position = executed_action[7:13].copy()
             self._right_state.gripper_position = float(executed_action[13])
         elif self.config.dry_run:
-            self._logger.info("hardware dry-run：候选动作未发送到机械臂。")
+            self._logger.info(
+                "hardware dry-run: policy action intercepted and not sent: %s",
+                np.array2string(executed_action, precision=6, separator=", "),
+            )
         else:
+            if (
+                self._left_controller.control_mode == "gravity_compensation"
+                or self._right_controller.control_mode == "gravity_compensation"
+            ):
+                self._enable_dual_position_control()
             self._send_absolute_action(executed_action)
             action_sent = True
 
-        elapsed = time.monotonic() - start_time
-        time.sleep(max(0.0, 1.0 / self.config.step_frequency - elapsed))
-
         if not self.config.is_dummy:
-            try:
-                self._read_robot_state()
-            except Exception as exc:
-                self._enter_damping_after_error()
-                raise RuntimeError("ARX 动作执行后读取双臂状态失败。") from exc
+            self._read_robot_state()
 
         self._num_steps += 1
         observation = self._get_observation()
+
+        elapsed = time.monotonic() - start_time
+        time.sleep(max(0.0, 1.0 / self.config.step_frequency - elapsed))
         truncated = self._num_steps >= self.config.max_num_steps
         info = {
             "requested_action": requested_action.astype(np.float32),
@@ -1001,22 +885,26 @@ class ArxX5DualEnv(gym.Env):
         return observation, 0.0, False, truncated, info
 
     def close(self) -> None:
-        """关闭三路相机，并让左右机械臂进入阻尼/被动状态。
-
-        函数可以重复调用。相机和控制器分别关闭；即使某一路硬件关闭失败，也会
-        继续尝试释放其他硬件，最后记录错误而不是让资源释放流程提前中断。
-        """
+        """Match BiARX5.disconnect while keeping this method idempotent."""
 
         if self._closed:
             return
         self._closed = True
 
-        for camera in self._cameras:
+        if not self.config.is_dummy:
             try:
-                camera.close()
+                self._smooth_go_home()
+                self._left_controller.set_to_damping()
+                self._right_controller.set_to_damping()
+            except KeyboardInterrupt:
+                self._logger.warning(
+                    "Disconnect interrupted. Forcing damping mode on both arms."
+                )
+                self._enter_damping_after_error()
             except Exception as exc:
-                self._logger.warning("关闭相机失败：%s", exc)
-        self._cameras = []
+                self._logger.warning("Failed to disconnect ARX dual arms: %s", exc)
+
+        self._close_cameras_parallel()
 
         for label, controller in (
             ("left", getattr(self, "_left_controller", None)),
@@ -1027,4 +915,9 @@ class ArxX5DualEnv(gym.Env):
             try:
                 controller.close()
             except Exception as exc:
-                self._logger.warning("关闭 %s ARX 控制器失败：%s", label, exc)
+                self._logger.warning(
+                    "Failed to release %s ARX controller: %s", label, exc
+                )
+
+        if not self.config.is_dummy:
+            time.sleep(1.0)
