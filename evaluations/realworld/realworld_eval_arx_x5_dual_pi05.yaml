@@ -69,6 +69,13 @@ cluster:
       env_configs:
         - node_ranks: 1
           python_interpreter_path: /home/xi/Downloads/RLinf/.venv/bin/python3
+          env_vars:
+            # Pin the keyboard device for KeyboardEvalControlWrapper on the robot
+            # node (multiple keyboard-capable devices are present). This Legion
+            # laptop's real built-in keyboard is the ITE 8258 device; the legacy
+            # "AT Translated Set 2" (i8042) node exists but emits no keystrokes.
+            # Use the stable by-id path so it survives reboots / event renumbering.
+            - RLINF_KEYBOARD_DEVICE: /dev/input/by-id/usb-ITE_Tech._Inc._ITE_Device_8258_-event-kbd
 
 runner:
   task_type: embodied_eval
