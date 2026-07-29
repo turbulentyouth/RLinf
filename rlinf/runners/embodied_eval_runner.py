@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import signal
 import typing
+from contextlib import contextmanager
 
 from rlinf.scheduler import Channel
 from rlinf.scheduler import WorkerGroupFuncResult as Handle
@@ -59,6 +61,45 @@ class EmbodiedEvalRunner:
         rollout_handle.wait()
         env_handle.wait()
 
+    @contextmanager
+    def _shield_termination_signals(self):
+        """Ignore SIGINT/SIGTERM for the duration of the block.
+
+        Real-world arms only hold torque while the env worker is alive, so the
+        homing RPC must finish before the process exits. Without shielding, an
+        operator pressing Ctrl-C again during the ~seconds-long home trajectory
+        would raise KeyboardInterrupt, abort the wait, let the driver exit, and
+        Ray would SIGKILL the env actor mid-home — dropping the arms. Runs in
+        the driver main thread, so signal.signal() is valid here.
+        """
+
+        previous = {}
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                previous[sig] = signal.signal(sig, signal.SIG_IGN)
+            except (ValueError, OSError):
+                pass
+        try:
+            yield
+        finally:
+            for sig, handler in previous.items():
+                try:
+                    signal.signal(sig, handler)
+                except (ValueError, OSError):
+                    pass
+
+    def _close_envs_safely(self):
+        """Home/close the envs, shielded so Ctrl-C cannot abort the homing."""
+
+        with self._shield_termination_signals():
+            try:
+                close_handle = self.env.close_envs()
+                close_handle.wait()
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to close evaluation environments: %s", exc
+                )
+
     def evaluate(self):
         env_handle: Handle = self.env.evaluate(
             input_channel=self.env_channel,
@@ -75,18 +116,19 @@ class EmbodiedEvalRunner:
                 rollout_handle.wait()
         except KeyboardInterrupt:
             self.logger.info(
-                "Manual stop requested; asking evaluation workers to finish the "
-                "current action exchange before closing the environments."
+                "Manual stop requested; halting workers so run()'s shielded "
+                "close_envs() can home the arms."
             )
-            stop_handles = [
-                self.env.request_eval_stop(),
-                self.rollout.request_eval_stop(),
-            ]
-            for stop_handle in stop_handles:
-                stop_handle.wait()
-            env_handle.wait()
-            if not env_decoupled_mode:
-                rollout_handle.wait()
+            # Stop stepping and break any blocking manual-control wait. Do NOT
+            # block on the eval handles here: if a worker is wedged in recv, a
+            # further Ctrl-C should fall straight through to run()'s shielded
+            # close_envs(), which is idempotent and runs on a separate actor
+            # thread, so the arms are homed regardless of the eval loop state.
+            try:
+                self.env.request_eval_stop().wait()
+                self.rollout.request_eval_stop().wait()
+            except Exception as exc:
+                self.logger.warning("Failed to request cooperative stop: %s", exc)
             raise
         eval_metrics_list = [results for results in env_results if results is not None]
         eval_metrics = compute_evaluate_metrics(eval_metrics_list)
@@ -120,9 +162,5 @@ class EmbodiedEvalRunner:
                 cycle,
             )
         finally:
-            try:
-                close_handle = self.env.close_envs()
-                close_handle.wait()
-            except Exception as exc:
-                self.logger.warning("Failed to close evaluation environments: %s", exc)
+            self._close_envs_safely()
             self.metric_logger.finish()

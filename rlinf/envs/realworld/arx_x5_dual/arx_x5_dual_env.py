@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -296,6 +297,11 @@ class ArxX5DualEnv(gym.Env):
         self.node_rank = worker_info.cluster_node_rank if worker_info else 0
         self.worker_rank = worker_info.rank if worker_info else 0
         self._closed = False
+        # Serializes hardware I/O between step() (called from the eval thread)
+        # and close()/_smooth_go_home (which may run on a separate Ray actor
+        # thread during a Ctrl-C shutdown). Without this the shutdown homing
+        # trajectory and an in-flight policy action can fight over the CAN bus.
+        self._control_lock = threading.RLock()
 
         self._left_state = ArxX5ArmState()
         self._right_state = ArxX5ArmState()
@@ -842,27 +848,34 @@ class ArxX5DualEnv(gym.Env):
         executed_action = requested_action.copy()
 
         action_sent = False
-        if self.config.is_dummy:
-            self._left_state.joint_position = executed_action[:6].copy()
-            self._left_state.gripper_position = float(executed_action[6])
-            self._right_state.joint_position = executed_action[7:13].copy()
-            self._right_state.gripper_position = float(executed_action[13])
-        elif self.config.dry_run:
-            self._logger.info(
-                "hardware dry-run: policy action intercepted and not sent: %s",
-                np.array2string(executed_action, precision=6, separator=", "),
-            )
-        else:
-            if (
-                self._left_controller.control_mode == "gravity_compensation"
-                or self._right_controller.control_mode == "gravity_compensation"
-            ):
-                self._enable_dual_position_control()
-            self._send_absolute_action(executed_action)
-            action_sent = True
+        with self._control_lock:
+            if self.config.is_dummy:
+                self._left_state.joint_position = executed_action[:6].copy()
+                self._left_state.gripper_position = float(executed_action[6])
+                self._right_state.joint_position = executed_action[7:13].copy()
+                self._right_state.gripper_position = float(executed_action[13])
+            elif self.config.dry_run:
+                self._logger.info(
+                    "hardware dry-run: policy action intercepted and not sent: %s",
+                    np.array2string(executed_action, precision=6, separator=", "),
+                )
+            elif self._closed:
+                # A shutdown/home is running on another thread; hold instead of
+                # sending so we never fight the homing trajectory on the bus.
+                self._logger.warning(
+                    "Env is closing; policy action held instead of sent."
+                )
+            else:
+                if (
+                    self._left_controller.control_mode == "gravity_compensation"
+                    or self._right_controller.control_mode == "gravity_compensation"
+                ):
+                    self._enable_dual_position_control()
+                self._send_absolute_action(executed_action)
+                action_sent = True
 
-        if not self.config.is_dummy:
-            self._read_robot_state()
+            if not self.config.is_dummy:
+                self._read_robot_state()
 
         self._num_steps += 1
         observation = self._get_observation()
@@ -892,17 +905,23 @@ class ArxX5DualEnv(gym.Env):
         self._closed = True
 
         if not self.config.is_dummy:
-            try:
-                self._smooth_go_home()
-                self._left_controller.set_to_damping()
-                self._right_controller.set_to_damping()
-            except KeyboardInterrupt:
-                self._logger.warning(
-                    "Disconnect interrupted. Forcing damping mode on both arms."
-                )
-                self._enter_damping_after_error()
-            except Exception as exc:
-                self._logger.warning("Failed to disconnect ARX dual arms: %s", exc)
+            # Serialize against any in-flight step() so the homing trajectory
+            # owns the bus. _closed is already set above, so once we hold the
+            # lock no further action is sent.
+            with self._control_lock:
+                try:
+                    self._smooth_go_home()
+                    self._left_controller.set_to_damping()
+                    self._right_controller.set_to_damping()
+                except KeyboardInterrupt:
+                    self._logger.warning(
+                        "Disconnect interrupted. Forcing damping mode on both arms."
+                    )
+                    self._enter_damping_after_error()
+                except Exception as exc:
+                    self._logger.warning(
+                        "Failed to disconnect ARX dual arms: %s", exc
+                    )
 
         self._close_cameras_parallel()
 
