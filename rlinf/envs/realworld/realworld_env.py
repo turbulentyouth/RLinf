@@ -27,7 +27,7 @@ from filelock import FileLock
 from omegaconf import OmegaConf
 
 from rlinf.envs.realworld.venv import NoAutoResetSyncVectorEnv
-from rlinf.envs.utils import to_tensor
+from rlinf.envs.utils import get_env_attr, to_tensor
 from rlinf.scheduler import WorkerInfo
 
 
@@ -367,6 +367,19 @@ class RealWorldEnv(gym.Env):
             chunk_truncations,
             infos_list,
         )
+
+    def request_eval_stop(self) -> None:
+        """Break blocking manual-control waits in the underlying hardware envs.
+
+        The env worker calls this on cooperative shutdown so any per-env wrapper
+        parked in a start/reset wait (e.g. KeyboardEvalControlWrapper) returns
+        promptly, letting the driver's close()/home run instead of stalling.
+        """
+
+        for env in getattr(self.env, "envs", []):
+            request_stop = get_env_attr(env, "request_stop")
+            if callable(request_stop):
+                request_stop()
 
     def close(self) -> None:
         """Close the vector environment and its underlying hardware envs."""

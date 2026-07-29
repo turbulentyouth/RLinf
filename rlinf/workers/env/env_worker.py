@@ -13,7 +13,13 @@
 # limitations under the License.
 
 import asyncio
+import atexit
 import gc
+import os
+import signal
+import sys
+import threading
+import traceback
 from collections import defaultdict
 from typing import Any
 
@@ -64,6 +70,11 @@ class EnvWorker(Worker):
         self.eval_video_cnt = 0
         self.should_stop = False
         self._eval_stop_requested = False
+        # Real-world hardware safety: when True, SIGINT/SIGTERM and interpreter
+        # exit drive the arms home via close_envs() instead of the base Worker's
+        # SIGKILL-on-signal. Enabled in init_worker() for real-world envs only.
+        self._home_on_signal = False
+        self._shutdown_done = False
 
         self.env_list = []
         self.eval_env_list = []
@@ -257,6 +268,18 @@ class EnvWorker(Worker):
                 self.history_lengths = [{} for _ in range(self.stage_num)]
 
         self._init_env()
+
+        # Real-world hardware safety net: once the envs (and their background CAN
+        # threads that hold arm torque) exist, arm the in-process homing path so a
+        # SIGINT/SIGTERM or interpreter exit drives the arms home even when the
+        # driver never completes its cross-node close_envs() RPC.
+        if self._should_home_on_shutdown():
+            self._home_on_signal = True
+            atexit.register(self._graceful_env_shutdown)
+            self.log_info(
+                "Real-world env worker armed: SIGINT/SIGTERM/exit will home the "
+                "arms before the process terminates."
+            )
 
     def update_env_cfg(self):
         if self.enable_train:
@@ -1263,6 +1286,23 @@ class EnvWorker(Worker):
         """Request cooperative termination of the active evaluation loop."""
 
         self._eval_stop_requested = True
+        self._propagate_eval_stop()
+
+    def _propagate_eval_stop(self) -> None:
+        """Ask each env to break any blocking manual-control wait.
+
+        Without this a wrapper parked in a start/reset wait keeps the evaluate
+        thread pinned, so the driver's cooperative stop never lets close()/home
+        run. Best-effort and defensive: envs without the hook are skipped.
+        """
+
+        for env in [*self.env_list, *self.eval_env_list]:
+            request_stop = get_env_attr(env, "request_eval_stop")
+            if callable(request_stop):
+                try:
+                    request_stop()
+                except Exception as exc:
+                    self.log_warning(f"Failed to signal env stop: {exc}")
 
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
         self._eval_stop_requested = False
@@ -1359,6 +1399,105 @@ class EnvWorker(Worker):
             eval_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
 
         return eval_metrics
+
+    def _should_home_on_shutdown(self) -> bool:
+        """Real-world env workers must return hardware to a safe pose on exit."""
+
+        for scope in ("train", "eval"):
+            env_cfg = self.cfg.env.get(scope, None)
+            if env_cfg is not None and env_cfg.get("env_type", None) == "realworld":
+                return True
+        return False
+
+    def _graceful_env_shutdown(self) -> None:
+        """Idempotently stop eval and close (home) all envs before the process dies.
+
+        Invoked from the SIGINT/SIGTERM handler and from atexit so a real-world
+        arm homes even when the driver never completes its close_envs() RPC
+        (double Ctrl-C, kill, terminal hangup, Ray tearing down the actor).
+        """
+
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        self._eval_stop_requested = True
+        try:
+            self._propagate_eval_stop()
+        except Exception as exc:
+            self.log_warning(f"Failed to signal env stop during shutdown: {exc}")
+        self.close_envs()
+
+    def _register_signal_handlers(self):
+        """Home real-world arms on signals instead of the base SIGKILL-on-signal.
+
+        The base Worker either installs nothing (CATCH_SYSTEM_FAILURE=0) or a
+        handler that immediately ``SIGKILL``s the process; neither returns a
+        physical robot to a safe pose, so the arms lose holding torque and drop.
+        Here SIGINT/SIGTERM first drive the arms home via ``_graceful_env_shutdown``
+        and then re-raise the original signal so the process still terminates.
+        Homing only runs once ``_home_on_signal`` is set (real-world envs); other
+        env workers keep the base debugging behavior.
+        """
+
+        # Install the base handlers first (SIGSEGV/SIGABRT/etc. debug traps when
+        # CATCH_SYSTEM_FAILURE=1; a no-op otherwise). We then capture and take
+        # over only SIGINT/SIGTERM below, so the base debug behavior for the
+        # hard-failure signals is preserved verbatim.
+        super()._register_signal_handlers()
+
+        # Preserve whatever handler is installed for SIGINT/SIGTERM before us
+        # (Ray's, Python's default, or the base SIGKILL handler when
+        # CATCH_SYSTEM_FAILURE=1) so the non-real-world path keeps behaving
+        # exactly as it did before this override — we only take over when homing
+        # is armed.
+        prev_handlers: dict[int, Any] = {}
+
+        def _chain_previous(signum, frame):
+            prev = prev_handlers.get(signum, signal.SIG_DFL)
+            if callable(prev):
+                prev(signum, frame)
+            elif prev == signal.SIG_IGN:
+                return
+            else:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+
+        def signal_handler(signum, frame):
+            if getattr(self, "_home_on_signal", False):
+                logger = getattr(self, "_logger", None)
+                if logger is not None:
+                    logger.error(
+                        "Received signal %s (%s) in env worker %s; homing "
+                        "real-world envs before exit.",
+                        signum,
+                        signal.strsignal(signum),
+                        getattr(self, "_worker_address", "?"),
+                    )
+                try:
+                    self._graceful_env_shutdown()
+                except BaseException:
+                    traceback.print_exc()
+                # Terminate with the default disposition once the arms are safe.
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+            else:
+                # Not a real-world worker: defer to the pre-existing handler so
+                # Ray/Python crash handling is unchanged.
+                _chain_previous(signum, frame)
+
+        try:
+            # Always guard the interactive/termination signals: real-world envs
+            # need them to home, and _home_on_signal gates whether homing runs.
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                prev_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, signal_handler)
+        except ValueError:
+            logger = getattr(self, "_logger", None)
+            if logger is not None:
+                logger.warning(
+                    "Failed to register signal handlers. This may happen if the "
+                    "Worker is not running in the main thread."
+                )
 
     def close_envs(self) -> None:
         """Close all initialized train/eval environments on this worker."""

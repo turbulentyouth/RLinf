@@ -19,6 +19,7 @@ Pedal: ``a`` starts a rollout from idle; ``c`` ends with reward=1
 """
 
 import math
+import threading
 import time
 from typing import Any, SupportsFloat
 
@@ -69,6 +70,17 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         self._running = False
         self._last_obs: Any = None
         self._last_press_ts: dict[str, float] = {}
+        # Set by request_stop() (e.g. from the env worker's shutdown path) so
+        # the blocking idle/reset waits below break promptly instead of pinning
+        # the evaluate thread while the driver is trying to close and home the
+        # arms. Without this, a Ctrl-C during the post-reset wait cannot reach
+        # close() and the arms drop when the process is finally killed.
+        self._stop_event = threading.Event()
+
+    def request_stop(self) -> None:
+        """Break any blocking start/reset wait so shutdown can home the arms."""
+
+        self._stop_event.set()
 
     def reset(self, *, seed=None, options=None):
         self._last_press_ts.clear()
@@ -85,7 +97,7 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
             "to start the next rollout (Ctrl-C to abort)."
         )
         last_heartbeat = time.monotonic()
-        while True:
+        while not self._stop_event.is_set():
             time.sleep(self.IDLE_POLL_S)
             now = time.monotonic()
             if now - last_heartbeat >= self.WAIT_HEARTBEAT_S:
@@ -96,6 +108,8 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
                     self._running = True
                     self._log_info("Pedal 'a' pressed; starting rollout.")
                     return obs, info
+        self._log_info("Stop requested while idle; returning to let shutdown home.")
+        return obs, info
 
     def step(
         self, action: ActType
@@ -174,6 +188,9 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
     def close(self) -> None:
         """Close the optional recorder before releasing the wrapped environment."""
 
+        # Unblock any wait running in another thread so close() (and the home
+        # trajectory it triggers) is not racing a still-blocked reset.
+        self._stop_event.set()
         try:
             if self.episode_recorder is not None:
                 self.episode_recorder.close()
@@ -192,6 +209,11 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
             self.continue_key,
         )
         while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                self._log_info(
+                    "Stop requested during reset wait; returning to let shutdown home."
+                )
+                return obs, info
             for key in self.listener.pop_pressed_keys():
                 if self.continue_key is not None and key == self.continue_key:
                     self._running = True
