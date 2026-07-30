@@ -38,7 +38,7 @@
    * - NVIDIA 驱动
      - 535.183.06
    * - CUDA
-     - 12.4
+     - 12.8
    * - Docker
      - 26.0.0
    * - NVIDIA Container Toolkit
