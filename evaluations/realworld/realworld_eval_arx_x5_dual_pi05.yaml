@@ -78,13 +78,6 @@ runner:
     project_name: arx-x5-dual-openpi
     experiment_name: ${run_modes.${run_mode}.experiment_name}
     logger_backends: ["tensorboard"]
-  max_epochs: 1
-  max_steps: 1
-  only_eval: true
-  val_check_interval: -1
-  save_interval: -1
-  resume_dir: null
-  ckpt_path: null
   continuous_eval:
     enabled: true
     max_cycles: null
