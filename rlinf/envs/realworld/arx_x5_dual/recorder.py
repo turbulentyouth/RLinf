@@ -117,7 +117,9 @@ class ArxX5DualLeRobotRecorder:
         self._task = task
         self._frame_count = 0
         self._closed = False
-        dataset_root = Path(root).expanduser() if root else Path(HF_LEROBOT_HOME)
+        dataset_root = (
+            Path(root).expanduser() if root else Path(HF_LEROBOT_HOME) / repo_id
+        )
         features = _features(image_height, image_width, use_videos)
         if resume and (dataset_root / "meta" / "info.json").is_file():
             dataset = LeRobotDataset(
@@ -137,7 +139,27 @@ class ArxX5DualLeRobotRecorder:
                 dataset.meta.total_episodes,
             )
         else:
+            dir_exists = dataset_root.exists()
+            non_empty = dir_exists and any(dataset_root.iterdir())
+            if resume and non_empty:
+                raise RuntimeError(
+                    "ARX LeRobot resume requested but the dataset at "
+                    f"{dataset_root} is missing meta/info.json while its directory "
+                    "is non-empty; it looks incomplete or corrupted. Move or delete "
+                    "it before resuming, or point recording.repo_id/root elsewhere."
+                )
+            if not resume and dir_exists:
+                raise FileExistsError(
+                    f"ARX LeRobot dataset directory {dataset_root} already exists. "
+                    "Set recording.resume=true to append to the existing dataset, or "
+                    "move/delete the directory to record from scratch."
+                )
             if resume:
+                if dir_exists:
+                    # Empty leftover directory: LeRobotDataset.create() calls
+                    # mkdir(exist_ok=False), so remove the empty dir to avoid a
+                    # FileExistsError.
+                    dataset_root.rmdir()
                 self._logger.info(
                     "ARX LeRobot resume requested but no existing dataset at %s; "
                     "creating a new one.",
