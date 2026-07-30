@@ -96,9 +96,7 @@ class EmbodiedEvalRunner:
                 close_handle = self.env.close_envs()
                 close_handle.wait()
             except Exception as exc:
-                self.logger.warning(
-                    "Failed to close evaluation environments: %s", exc
-                )
+                self.logger.warning("Failed to close evaluation environments: %s", exc)
 
     def evaluate(self):
         env_handle: Handle = self.env.evaluate(
@@ -112,7 +110,12 @@ class EmbodiedEvalRunner:
         env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
         try:
             env_results = env_handle.wait()
-            if not env_decoupled_mode:
+            # On an operator-requested exit the env side wound down early and
+            # no more observations are coming; the rollout worker is left
+            # parked in recv and reclaimed by Ray when the driver exits, so
+            # do not block on its handle (same rationale as the Ctrl-C path).
+            exit_requested = self._eval_exit_requested()
+            if not env_decoupled_mode and not exit_requested:
                 rollout_handle.wait()
         except KeyboardInterrupt:
             self.logger.info(
@@ -133,6 +136,16 @@ class EmbodiedEvalRunner:
         eval_metrics_list = [results for results in env_results if results is not None]
         eval_metrics = compute_evaluate_metrics(eval_metrics_list)
         return eval_metrics
+
+    def _eval_exit_requested(self) -> bool:
+        """Query the env group for an operator-requested graceful exit."""
+
+        try:
+            results = self.env.get_eval_exit_requested().wait()
+        except Exception as exc:
+            self.logger.warning("Failed to query eval exit flag: %s", exc)
+            return False
+        return any(bool(result) for result in results if result is not None)
 
     def run(self):
         continuous_cfg = self.cfg.runner.get("continuous_eval", {})
@@ -155,6 +168,19 @@ class EmbodiedEvalRunner:
                 if not continuous_enabled:
                     break
                 if max_cycles is not None and cycle >= int(max_cycles):
+                    break
+                if self._eval_exit_requested():
+                    self.logger.info(
+                        "Operator requested exit (e.g. ESC); closing envs and "
+                        "stopping after %d completed cycles.",
+                        cycle,
+                    )
+                    try:
+                        self.rollout.request_eval_stop().wait()
+                    except Exception as exc:
+                        self.logger.warning(
+                            "Failed to request rollout stop on exit: %s", exc
+                        )
                     break
         except KeyboardInterrupt:
             self.logger.info(

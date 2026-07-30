@@ -30,6 +30,7 @@ from PIL import Image
 
 from rlinf.envs.realworld.common.camera import BaseCamera, CameraInfo, create_camera
 from rlinf.scheduler import WorkerInfo
+from rlinf.utils.eval_events import emit_event
 from rlinf.utils.logging import get_logger
 
 from .arx_x5_dual_controller import ArxX5JointController
@@ -910,18 +911,19 @@ class ArxX5DualEnv(gym.Env):
             # lock no further action is sent.
             with self._control_lock:
                 try:
+                    emit_event("homing_start", "env")
                     self._smooth_go_home()
                     self._left_controller.set_to_damping()
                     self._right_controller.set_to_damping()
+                    emit_event("homing_done", "env")
                 except KeyboardInterrupt:
                     self._logger.warning(
                         "Disconnect interrupted. Forcing damping mode on both arms."
                     )
                     self._enter_damping_after_error()
                 except Exception as exc:
-                    self._logger.warning(
-                        "Failed to disconnect ARX dual arms: %s", exc
-                    )
+                    emit_event("close_error", "env", error=str(exc))
+                    self._logger.warning("Failed to disconnect ARX dual arms: %s", exc)
 
         self._close_cameras_parallel()
 
@@ -940,3 +942,4 @@ class ArxX5DualEnv(gym.Env):
 
         if not self.config.is_dummy:
             time.sleep(1.0)
+        emit_event("close_done", "env")

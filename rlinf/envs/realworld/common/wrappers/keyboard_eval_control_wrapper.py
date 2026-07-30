@@ -16,6 +16,9 @@
 Pedal: ``a`` starts a rollout from idle; ``c`` ends with reward=1
 ("success"); ``b`` ends with reward=0 ("failure"). On end, returns
 ``terminated=True`` and lets the outer ``auto_reset`` drive home.
+``exit_keys`` (e.g. ESC) do not raise: they set :attr:`exit_requested`,
+truncate the current episode, and let the env worker/runner wind down
+gracefully (close_envs homes the arms before the driver exits).
 """
 
 import math
@@ -26,6 +29,7 @@ import gymnasium as gym
 from gymnasium.core import ActType, ObsType
 
 from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListener
+from rlinf.utils.eval_events import emit_event
 
 
 class KeyboardEvalControlWrapper(gym.Wrapper):
@@ -67,8 +71,19 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         self.discard_keys = set(discard_keys)
         self.exit_keys = set(exit_keys)
         self._running = False
+        self._exit_requested = False
         self._last_obs: Any = None
         self._last_press_ts: dict[str, float] = {}
+
+    @property
+    def exit_requested(self) -> bool:
+        """Whether an exit key was pressed (request for a graceful eval stop).
+
+        Read by the env worker between chunks; once set, the evaluation loop
+        winds down and the runner closes the envs (homing the arms) instead
+        of the old behavior of raising KeyboardInterrupt inside the actor.
+        """
+        return self._exit_requested
 
     def reset(self, *, seed=None, options=None):
         self._last_press_ts.clear()
@@ -84,6 +99,7 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
             "Arms homed and idle. Arrange the scene, then press pedal 'a' "
             "to start the next rollout (Ctrl-C to abort)."
         )
+        emit_event("idle_wait_start", "wrapper")
         last_heartbeat = time.monotonic()
         while True:
             time.sleep(self.IDLE_POLL_S)
@@ -92,9 +108,16 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
                 last_heartbeat = now
                 self._log_info("Still waiting for pedal 'a' to start the rollout...")
             for key in self.listener.pop_pressed_keys():
+                if key in self.exit_keys:
+                    self._exit_requested = True
+                    self._log_info("Exit key pressed; winding down evaluation.")
+                    emit_event("exit_key", "wrapper", key=key, phase="idle_wait")
+                    emit_event("idle_wait_end", "wrapper", reason="exit_key")
+                    return obs, info
                 if key in self.start_keys:
                     self._running = True
                     self._log_info("Pedal 'a' pressed; starting rollout.")
+                    emit_event("idle_wait_end", "wrapper", reason="start_key", key=key)
                     return obs, info
 
     def step(
@@ -141,7 +164,11 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
                 if self.episode_recorder is not None:
                     self.episode_recorder.discard_episode("exit key pressed")
                 self._running = False
-                raise KeyboardInterrupt
+                self._exit_requested = True
+                truncated = True
+                result = "exit"
+                emit_event("exit_key", "wrapper", key=key)
+                break
             if key in self.interrupt_keys:
                 truncated = True
                 result = "interrupted"
@@ -159,12 +186,14 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
                 reward = 1.0
                 result = "success"
                 self._running = False
+                emit_event("episode_result_key", "wrapper", key=key, result="success")
                 break
             if key in self.failure_keys:
                 terminated = True
                 reward = 0.0
                 result = "failure"
                 self._running = False
+                emit_event("episode_result_key", "wrapper", key=key, result="failure")
                 break
 
         info["eval_phase"] = "rec" if self._running else "pre"
@@ -183,6 +212,8 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
     def _wait_after_reset(self, obs, info):
         """Wait for the configured delay or an early right-arrow press."""
 
+        if self._exit_requested:
+            return obs, info
         wait_seconds = float(self.reset_wait_seconds or 0.0)
         deadline = time.monotonic() + wait_seconds
         self._log_info(
@@ -191,15 +222,26 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
             wait_seconds,
             self.continue_key,
         )
+        emit_event("reset_wait_start", "wrapper", seconds=wait_seconds)
         while time.monotonic() < deadline:
             for key in self.listener.pop_pressed_keys():
+                if key in self.exit_keys:
+                    self._exit_requested = True
+                    self._log_info("Exit key pressed; winding down evaluation.")
+                    emit_event("exit_key", "wrapper", key=key, phase="reset_wait")
+                    emit_event("reset_wait_end", "wrapper", reason="exit_key")
+                    return obs, info
                 if self.continue_key is not None and key == self.continue_key:
                     self._running = True
                     self._log_info("Continue key pressed; starting next episode.")
+                    emit_event(
+                        "reset_wait_end", "wrapper", reason="continue_key", key=key
+                    )
                     return obs, info
             time.sleep(min(self.IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
         self._running = True
         self._log_info("Reset wait completed; starting next episode.")
+        emit_event("reset_wait_end", "wrapper", reason="timeout")
         return obs, info
 
     def _idle_response(self, event: str | None):

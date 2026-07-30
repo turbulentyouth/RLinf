@@ -116,6 +116,19 @@ class RealWorldEnv(gym.Env):
         )
 
     @property
+    def exit_requested(self) -> bool:
+        """Whether any wrapped env requested a graceful eval exit (e.g. ESC).
+
+        The env worker polls this between chunks via ``get_env_attr``; False
+        whenever no keyboard wrapper is installed.
+        """
+        try:
+            flags = self.env.call("get_wrapper_attr", "exit_requested")
+        except Exception:
+            return False
+        return any(bool(flag) for flag in flags)
+
+    @property
     def action_space(self):
         return self.env.action_space
 

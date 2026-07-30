@@ -190,13 +190,17 @@ def _convert_jax_checkpoint(config: OpenPiCheckpointConfig, output_dir: Path) ->
     """Run the existing OpenPI JAX-to-PyTorch parameter conversion."""
 
     from openpi.models import pi0_config
-    from openpi.training import config as openpi_config
 
+    from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
     from rlinf.utils.ckpt_convertor.convert_openpi_jax_to_python import (
         convert_pi0_checkpoint,
     )
 
-    model_config = openpi_config.get_config(config.config_name).model
+    # Resolve the model config from RLinf's own registry; the OpenPI package
+    # does not know RLinf-specific configs such as pi05_arx_x5_dual.
+    model_config = get_openpi_config(
+        config.config_name, model_path=config.checkpoint_path
+    ).model
     if not isinstance(model_config, pi0_config.Pi0Config):
         raise ValueError(f"OpenPI config {config.config_name} is not a Pi0Config.")
     convert_pi0_checkpoint(

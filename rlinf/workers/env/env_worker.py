@@ -39,6 +39,7 @@ from rlinf.envs.wrappers import RecordVideo
 from rlinf.scheduler import Channel, Cluster, CommMapper, Worker
 from rlinf.utils.data_iter_utils import split_list
 from rlinf.utils.distributed import masked_stats, normalize_from_stats
+from rlinf.utils.eval_events import emit_event
 from rlinf.utils.metric_utils import compute_split_num
 from rlinf.utils.nested_dict_process import (
     clone_nested_to_cpu,
@@ -64,6 +65,7 @@ class EnvWorker(Worker):
         self.eval_video_cnt = 0
         self.should_stop = False
         self._eval_stop_requested = False
+        self._eval_exit_requested = False
 
         self.env_list = []
         self.eval_env_list = []
@@ -1264,8 +1266,29 @@ class EnvWorker(Worker):
 
         self._eval_stop_requested = True
 
+    def get_eval_exit_requested(self) -> bool:
+        """Report whether the env requested a graceful eval exit (e.g. ESC)."""
+
+        return self._eval_exit_requested
+
+    def _poll_eval_exit_request(self, stage_id: int) -> None:
+        """Latch a graceful exit requested from inside the env (e.g. ESC key).
+
+        Sets the same stop flag as :meth:`request_eval_stop` so the evaluate
+        loop winds down at the next chunk boundary, and records the exit
+        reason for the runner to query via :meth:`get_eval_exit_requested`.
+        """
+        if self._eval_stop_requested:
+            return
+        if get_env_attr(self.eval_env_list[stage_id], "exit_requested", False):
+            self._eval_stop_requested = True
+            self._eval_exit_requested = True
+            emit_event("exit_requested", "env_worker", stage_id=stage_id)
+
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
         self._eval_stop_requested = False
+        self._eval_exit_requested = False
+        emit_event("evaluate_start", "env_worker")
         eval_metrics = defaultdict(list)
         for eval_rollout_epoch in range(self.eval_rollout_epoch):
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
@@ -1275,6 +1298,7 @@ class EnvWorker(Worker):
                         self.eval_num_envs_per_stage, dtype=torch.bool
                     )
                     extracted_obs, infos = self.eval_env_list[stage_id].reset()
+                    self._poll_eval_exit_request(stage_id)
                     env_output = EnvOutput(
                         obs=extracted_obs,
                         final_obs=(
@@ -1294,6 +1318,12 @@ class EnvWorker(Worker):
                         route_key=stage_id if not self.env_decoupled_mode else None,
                         decoupled_mode=self.env_decoupled_mode,
                     )
+                    emit_event(
+                        "obs_sent",
+                        "env_worker",
+                        kind="reset",
+                        epoch=eval_rollout_epoch,
+                    )
 
             for eval_step in range(self.n_eval_chunk_steps):
                 for stage_id in range(self.stage_num):
@@ -1308,11 +1338,22 @@ class EnvWorker(Worker):
                         else None,
                         decoupled_mode=self.env_decoupled_mode,
                     )
+                    emit_event(
+                        "actions_received",
+                        "env_worker",
+                        chunk=eval_step + 1,
+                        n_chunks=self.n_eval_chunk_steps,
+                        epoch=eval_rollout_epoch,
+                    )
                     raw_chunk_actions = (
                         rollout_results.actions
                         if hasattr(rollout_results, "actions")
                         else rollout_results
                     )
+                    if self._eval_stop_requested:
+                        # Exit was requested during reset: keep the channel
+                        # exchange symmetric but do not execute these actions.
+                        break
                     if isinstance(raw_chunk_actions, torch.Tensor):
                         raw_chunk_actions = raw_chunk_actions.detach().cpu().numpy()
                     else:
@@ -1320,6 +1361,7 @@ class EnvWorker(Worker):
                     env_output, env_info = self.env_evaluate_step(
                         raw_chunk_actions, stage_id
                     )
+                    self._poll_eval_exit_request(stage_id)
 
                     for key, value in env_info.items():
                         eval_metrics[key].append(value)
@@ -1344,12 +1386,32 @@ class EnvWorker(Worker):
                             route_key=stage_id if not self.env_decoupled_mode else None,
                             decoupled_mode=self.env_decoupled_mode,
                         )
+                        emit_event(
+                            "obs_sent",
+                            "env_worker",
+                            kind="next",
+                            chunk=eval_step + 1,
+                            n_chunks=self.n_eval_chunk_steps,
+                            epoch=eval_rollout_epoch,
+                        )
 
                 if self._eval_stop_requested:
+                    emit_event(
+                        "stop_requested",
+                        "env_worker",
+                        chunk=eval_step + 1,
+                        n_chunks=self.n_eval_chunk_steps,
+                        epoch=eval_rollout_epoch,
+                    )
                     break
 
             self.finish_rollout(mode="eval")
             if self._eval_stop_requested:
+                emit_event(
+                    "stop_requested",
+                    "env_worker",
+                    epoch=eval_rollout_epoch,
+                )
                 break
         for stage_id in range(self.stage_num):
             if self.eval_enable_offload:
@@ -1358,11 +1420,13 @@ class EnvWorker(Worker):
         for key, value in eval_metrics.items():
             eval_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
 
+        emit_event("evaluate_end", "env_worker")
         return eval_metrics
 
     def close_envs(self) -> None:
         """Close all initialized train/eval environments on this worker."""
 
+        emit_event("close_envs_start", "env_worker")
         closed_env_ids = set()
         for env in [*self.env_list, *self.eval_env_list]:
             if id(env) in closed_env_ids:
@@ -1375,6 +1439,7 @@ class EnvWorker(Worker):
                 close()
             except Exception as exc:
                 self.log_warning(f"Failed to close environment cleanly: {exc}")
+        emit_event("close_envs_done", "env_worker")
 
     def get_actor_split_num(self):
         send_num = self._component_placement.get_world_size("env") * self.stage_num

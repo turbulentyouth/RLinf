@@ -43,13 +43,14 @@ import openpi.models.gemma
 import openpi.models.model
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
-import openpi.training.config as _config
 import orbax.checkpoint as ocp
 import safetensors
 import torch
 import tyro
 from flax.nnx import traversals
 from openpi.training import utils
+
+from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
 
 
 def slice_paligemma_state_dict(state_dict, config):
@@ -335,7 +336,7 @@ def slice_paligemma_state_dict(state_dict, config):
     return final_state_dict, expert_dict
 
 
-def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi05):
+def slice_gemma_state_dict(state_dict, config, *, num_expert, pi05):
     """Convert Gemma JAX parameters to PyTorch format."""
     # Add missing attributes to config if they don't exist
     if not hasattr(config, "vocab_size"):
@@ -369,7 +370,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
     llm_mlp_linear = state_dict.pop(f"llm/layers/mlp_{num_expert}/linear{suffix}")
 
     # Check if we have Dense layers (for pi05/adaptive normalization) or scale layers (for regular pi0)
-    if "pi05" in checkpoint_dir:
+    if pi05:
         # Pi05 with adaptive normalization
         llm_input_layernorm_bias = state_dict.pop(
             f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/bias{suffix}"
@@ -432,7 +433,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
             f"paligemma_with_expert.gemma_expert.model.layers.{i}.mlp.down_proj.weight"
         ] = llm_mlp_linear[i].transpose()
 
-        if "pi05" in checkpoint_dir:
+        if pi05:
             # Pi05 with adaptive normalization - use Dense layer parameters directly
             state_dict[
                 f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.bias"
@@ -456,7 +457,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
             ] = llm_post_attention_layernorm[i]
 
     # Handle final norm layer
-    if "pi05" in checkpoint_dir:
+    if pi05:
         # Pi05 with adaptive normalization - use Dense layer parameters directly
         final_norm_bias = state_dict.pop(
             f"llm/final_norm_{num_expert}/Dense_0/bias{suffix}"
@@ -621,7 +622,6 @@ def convert_pi0_checkpoint(
         expert_params,
         action_expert_config,
         num_expert=1,
-        checkpoint_dir=checkpoint_dir,
         pi05=model_config.pi05,
     )
 
@@ -688,7 +688,7 @@ def main(
         precision: Precision for model conversion
         inspect_only: Only inspect parameter keys, don't convert
     """
-    model_config = _config.get_config(config_name).model
+    model_config = get_openpi_config(config_name, model_path=checkpoint_dir).model
     if not isinstance(model_config, openpi.models.pi0_config.Pi0Config):
         raise ValueError(f"Config {config_name} is not a Pi0Config")
     if inspect_only:

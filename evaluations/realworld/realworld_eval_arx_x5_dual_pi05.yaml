@@ -111,7 +111,8 @@ env:
     max_steps_per_rollout_epoch: ${run_modes.${run_mode}.max_steps_per_rollout_epoch}
     episode_control:
       enabled: ${run_modes.${run_mode}.episode_control_enabled}
-      # 推理中：左方向键丢弃并 reset，右方向键保存并 reset，ESC 丢弃并退出。
+      # 推理中：左方向键丢弃并 reset，右方向键保存并 reset；
+      # ESC 丢弃当前 episode 并优雅退出（机械臂回零后服务器端退出）。
       # 回到 start position 后等待的时间；等待期间按右方向键立即开始下一轮。
       reset_wait_seconds: 2000.0
     recording:

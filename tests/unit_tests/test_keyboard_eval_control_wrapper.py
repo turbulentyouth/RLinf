@@ -80,3 +80,44 @@ def test_underlying_max_step_truncation_is_preserved(monkeypatch):
 
     assert truncated is True
     assert info["eval_result"] is None
+
+
+def test_esc_requests_graceful_exit_instead_of_raising(monkeypatch):
+    wrapper = _wrapper(monkeypatch, _Env(), exit_keys=("Key.esc",))
+    _Listener.events = deque([[], ["Key.esc"]])
+    wrapper.reset()
+
+    _, _, _, truncated, info = wrapper.step(None)
+
+    assert truncated is True
+    assert info["eval_result"] == "exit"
+    assert wrapper.exit_requested is True
+    assert wrapper._running is False
+
+
+def test_esc_during_reset_wait_exits_immediately(monkeypatch):
+    wrapper = _wrapper(
+        monkeypatch, _Env(), reset_wait_seconds=60.0, exit_keys=("Key.esc",)
+    )
+    _Listener.events = deque([[], ["Key.esc"]])
+
+    wrapper.reset()
+
+    assert wrapper.exit_requested is True
+    assert wrapper._running is False
+
+
+def test_pending_exit_skips_reset_wait_entirely(monkeypatch):
+    wrapper = _wrapper(
+        monkeypatch, _Env(), reset_wait_seconds=60.0, exit_keys=("Key.esc",)
+    )
+    # 1st reset: clear [] then right-arrow ends the wait; step: ESC latches
+    # the exit flag; 2nd reset: clear [] then the wait must return instantly.
+    _Listener.events = deque([[], ["Key.right"], ["Key.esc"], []])
+    wrapper.reset()
+    wrapper.step(None)
+
+    wrapper.reset()
+
+    assert wrapper.exit_requested is True
+    assert wrapper._running is False
