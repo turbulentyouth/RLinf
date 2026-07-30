@@ -124,6 +124,9 @@ env:
       root: null
       # null reuses override_cfg.task_description, matching --task.
       task: null
+      # true 在已存在的数据集上断点续录（校验 features 后继续追加 episode）；
+      # 数据集不存在时自动创建新的。false 要求数据集目录不存在，从零创建。
+      resume: false
       fps: 30
       use_videos: true
       image_writer_threads: 4

@@ -74,6 +74,7 @@ def create_arx_x5_dual_env(
             use_videos=bool(recording.get("use_videos", True)),
             image_writer_threads=int(recording.get("image_writer_threads", 4)),
             image_writer_processes=int(recording.get("image_writer_processes", 0)),
+            resume=bool(recording.get("resume", False)),
         )
     if control and bool(control.get("enabled", False)):
         env = KeyboardEvalControlWrapper(

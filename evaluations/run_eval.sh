@@ -134,8 +134,8 @@ run_mani_ood_eval() {
 }
 
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <benchmark> <config_name> [hydra_overrides...]" >&2
-    echo "   or: $0 <config_name> [hydra_overrides...]" >&2
+    echo "Usage: $0 <benchmark> <config_name> [--resume] [hydra_overrides...]" >&2
+    echo "   or: $0 <config_name> [--resume] [hydra_overrides...]" >&2
     echo "   or: $0 mani-ood [config_name]  (requires EVAL_NAME, CKPT_PATH, TOTAL_NUM_ENVS, EVAL_ROLLOUT_EPOCH)" >&2
     exit 1
 fi
@@ -162,6 +162,19 @@ else
 fi
 
 EXTRA_ARGS=("$@")
+RESUME_RECORDING=false
+FILTERED_ARGS=()
+for arg in "${EXTRA_ARGS[@]}"; do
+    if [ "${arg}" = "--resume" ]; then
+        RESUME_RECORDING=true
+    else
+        FILTERED_ARGS+=("${arg}")
+    fi
+done
+EXTRA_ARGS=("${FILTERED_ARGS[@]}")
+if [ "${RESUME_RECORDING}" = "true" ]; then
+    EXTRA_ARGS+=("env.eval.recording.resume=true")
+fi
 CONFIG_PATH="${EVALUATIONS_PATH}/${BENCHMARK}"
 if [ ! -f "${CONFIG_PATH}/${CONFIG_NAME}.yaml" ]; then
     CONFIG_PATH="${EMBODIED_PATH}/config"

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -48,6 +49,44 @@ def _features(image_height: int, image_width: int, use_videos: bool) -> dict:
     return features
 
 
+def _canonicalize_features(features: Mapping[str, Any]) -> dict:
+    """Reduce features to the semantic fields used for resume validation.
+
+    ``info.json`` stores DEFAULT_FEATURES (``timestamp``/``frame_index``/...) and
+    encoder-injected ``info`` blocks that the in-code definition does not have,
+    so we only compare ``dtype``/``shape``/``names`` for the recording keys.
+    JSON round-trips convert tuples to lists, so normalize for a stable compare.
+    """
+
+    return {
+        key: json.loads(
+            json.dumps(
+                {field: value.get(field) for field in ("dtype", "shape", "names")},
+                sort_keys=True,
+                default=list,
+            )
+        )
+        for key, value in features.items()
+    }
+
+
+def _check_features_match(existing: Mapping[str, Any], requested: Mapping) -> None:
+    existing_c = _canonicalize_features(existing)
+    requested_c = _canonicalize_features(requested)
+    mismatched = sorted(
+        key for key in set(requested_c) if existing_c.get(key) != requested_c.get(key)
+    )
+    if not mismatched:
+        return
+    raise ValueError(
+        "ARX LeRobot resume requested but dataset features mismatch; "
+        f"mismatched keys: {mismatched}. Existing dataset: "
+        f"{json.dumps({k: existing_c.get(k) for k in mismatched}, sort_keys=True)}, "
+        "requested: "
+        f"{json.dumps({k: requested_c.get(k) for k in mismatched}, sort_keys=True)}."
+    )
+
+
 class ArxX5DualLeRobotRecorder:
     """Buffer ARX inference frames and explicitly save or discard episodes."""
 
@@ -63,8 +102,10 @@ class ArxX5DualLeRobotRecorder:
         use_videos: bool = True,
         image_writer_threads: int = 4,
         image_writer_processes: int = 0,
+        resume: bool = False,
     ) -> None:
         try:
+            from lerobot.common.constants import HF_LEROBOT_HOME
             from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
         except ImportError as exc:
             raise RuntimeError(
@@ -76,20 +117,47 @@ class ArxX5DualLeRobotRecorder:
         self._task = task
         self._frame_count = 0
         self._closed = False
-        self._dataset = LeRobotDataset.create(
-            repo_id=repo_id,
-            root=Path(root).expanduser() if root else None,
-            robot_type="bi_arx5",
-            fps=fps,
-            features=_features(image_height, image_width, use_videos),
-            use_videos=use_videos,
-            image_writer_threads=image_writer_threads,
-            image_writer_processes=image_writer_processes,
-        )
+        dataset_root = Path(root).expanduser() if root else Path(HF_LEROBOT_HOME)
+        features = _features(image_height, image_width, use_videos)
+        if resume and (dataset_root / "meta" / "info.json").is_file():
+            dataset = LeRobotDataset(
+                repo_id=repo_id,
+                root=dataset_root,
+                download_videos=False,
+            )
+            _check_features_match(dataset.meta.features, features)
+            if image_writer_processes or image_writer_threads:
+                dataset.start_image_writer(image_writer_processes, image_writer_threads)
+            dataset.episode_buffer = dataset.create_episode_buffer()
+            self._logger.info(
+                "Resuming ARX LeRobot recording: repo_id=%s, root=%s, "
+                "existing_episodes=%d",
+                repo_id,
+                dataset_root,
+                dataset.meta.total_episodes,
+            )
+        else:
+            if resume:
+                self._logger.info(
+                    "ARX LeRobot resume requested but no existing dataset at %s; "
+                    "creating a new one.",
+                    dataset_root,
+                )
+            dataset = LeRobotDataset.create(
+                repo_id=repo_id,
+                root=dataset_root,
+                robot_type="bi_arx5",
+                fps=fps,
+                features=features,
+                use_videos=use_videos,
+                image_writer_threads=image_writer_threads,
+                image_writer_processes=image_writer_processes,
+            )
+        self._dataset = dataset
         self._logger.info(
             "ARX LeRobot recording enabled: repo_id=%s, root=%s, task=%r, fps=%d",
             repo_id,
-            root or "<LeRobot default>",
+            dataset_root,
             task,
             fps,
         )
