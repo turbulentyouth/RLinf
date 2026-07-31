@@ -154,10 +154,12 @@ class EnvWorker(Worker):
             )
         self.n_eval_chunk_steps = 0
         if self.enable_eval:
-            self.n_eval_chunk_steps = (
-                self.cfg.env.eval.max_steps_per_rollout_epoch
-                // self.model_cfg.num_action_chunks
-            )
+            max_episode_steps = self.cfg.env.eval.get("max_episode_steps", None)
+            if max_episode_steps is None:
+                # null: episode end is owned externally (e.g. keyboard
+                # control); fall back to the per-epoch step budget.
+                max_episode_steps = self.cfg.env.eval.max_steps_per_rollout_epoch
+            self.n_eval_chunk_steps = max_episode_steps // self.model_cfg.num_action_chunks
         self.actor_split_num = (
             1 if not self.enable_train else self.get_actor_split_num()
         )

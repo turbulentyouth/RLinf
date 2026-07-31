@@ -969,11 +969,13 @@ def validate_embodied_cfg(cfg):
         ), (
             "env.eval.total_num_envs // env_world_size // rollout.pipeline_stage_num must be divisible by the group size"
         )
-        assert (
-            cfg.env.eval.max_steps_per_rollout_epoch % model_cfg.num_action_chunks == 0
-        ), (
-            "env.eval.max_steps_per_rollout_epoch must be divisible by actor.model.num_action_chunks"
-        )
+        eval_max_episode_steps = cfg.env.eval.get("max_episode_steps", None)
+        if eval_max_episode_steps is not None:
+            assert (
+                eval_max_episode_steps % model_cfg.num_action_chunks == 0
+            ), (
+                "env.eval.max_episode_steps must be divisible by actor.model.num_action_chunks"
+            )
 
     if not only_eval:
         assert cfg.env.train.total_num_envs > 0, (
@@ -1152,12 +1154,13 @@ def validate_offline_cfg(cfg: DictConfig) -> DictConfig:
         ), (
             "env.eval.total_num_envs // env_world_size // rollout.pipeline_stage_num must be divisible by the group size"
         )
-        assert (
-            cfg.env.eval.max_steps_per_rollout_epoch % cfg.actor.model.num_action_chunks
-            == 0
-        ), (
-            "env.eval.max_steps_per_rollout_epoch must be divisible by actor.model.num_action_chunks"
-        )
+        eval_max_episode_steps = cfg.env.eval.get("max_episode_steps", None)
+        if eval_max_episode_steps is not None:
+            assert (
+                eval_max_episode_steps % cfg.actor.model.num_action_chunks == 0
+            ), (
+                "env.eval.max_episode_steps must be divisible by actor.model.num_action_chunks"
+            )
     return cfg
 
 

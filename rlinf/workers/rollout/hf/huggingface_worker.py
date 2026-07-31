@@ -109,9 +109,13 @@ class MultiStepRolloutWorker(Worker):
         )
         self.n_eval_chunk_steps = 0
         if self.enable_eval:
+            max_episode_steps = cfg.env.eval.get("max_episode_steps", None)
+            if max_episode_steps is None:
+                # null: episode end is owned externally (e.g. keyboard
+                # control); fall back to the per-epoch step budget.
+                max_episode_steps = cfg.env.eval.max_steps_per_rollout_epoch
             self.n_eval_chunk_steps = (
-                cfg.env.eval.max_steps_per_rollout_epoch
-                // self.model_cfg.num_action_chunks
+                max_episode_steps // self.model_cfg.num_action_chunks
             )
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
         self.version = 0

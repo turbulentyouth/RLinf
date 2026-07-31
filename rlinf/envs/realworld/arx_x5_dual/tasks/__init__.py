@@ -55,6 +55,11 @@ def create_arx_x5_dual_env(
         hardware_info=hardware_info,
         env_idx=env_idx,
     )
+    max_episode_steps = env_cfg.get("max_episode_steps", None)
+    if max_episode_steps is not None:
+        # 单一步数权威源：外层 max_episode_steps 直接决定底层每条 episode
+        # 的截断阈值，不再由 override_cfg.max_num_steps 单独维护。
+        env.config.max_num_steps = int(max_episode_steps)
     control = env_cfg.get("episode_control", {})
     recording = env_cfg.get("recording", {})
     recorder = None
