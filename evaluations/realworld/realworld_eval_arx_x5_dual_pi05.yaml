@@ -110,16 +110,16 @@ env:
       reset_wait_seconds: 2000.0
     recording:
       # Equivalent to xense-openpi bi_arx5_real --record.
-      enabled: false
+      enabled: true
       # Equivalent to --record_repo_id; defaults to the LeRobot cache.
       repo_id: "xijingfeng/stack_cubes_0728"
       # null uses the LeRobot default; an absolute path matches --record_root.
       root: null
       # null reuses override_cfg.task_description, matching --task.
-      task: null
+      
       # true 在已存在的数据集上断点续录（校验 features 后继续追加 episode）；
       # 数据集不存在时自动创建新的。false 要求数据集目录不存在，从零创建。
-      resume: false
+      resume: true
       fps: 30
       use_videos: true
       image_writer_threads: 4
