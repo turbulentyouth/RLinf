@@ -58,24 +58,37 @@ def create_arx_x5_dual_env(
     control = env_cfg.get("episode_control", {})
     recording = env_cfg.get("recording", {})
     recorder = None
-    if recording and bool(recording.get("enabled", False)):
-        task = str(recording.get("task") or override_cfg.get("task_description", ""))
-        recorder = ArxX5DualLeRobotRecorder(
-            repo_id=str(recording["repo_id"]),
-            root=recording.get("root"),
-            task=task,
-            fps=int(
-                recording.get(
-                    "fps", round(float(override_cfg.get("step_frequency", 30.0)))
-                )
-            ),
-            image_height=int(override_cfg.get("image_height", 224)),
-            image_width=int(override_cfg.get("image_width", 224)),
-            use_videos=bool(recording.get("use_videos", True)),
-            image_writer_threads=int(recording.get("image_writer_threads", 4)),
-            image_writer_processes=int(recording.get("image_writer_processes", 0)),
-            resume=bool(recording.get("resume", False)),
-        )
+    try:
+        if recording and bool(recording.get("enabled", False)):
+            task = str(
+                recording.get("task") or override_cfg.get("task_description", "")
+            )
+            recorder = ArxX5DualLeRobotRecorder(
+                repo_id=str(recording["repo_id"]),
+                root=recording.get("root"),
+                task=task,
+                fps=int(
+                    recording.get(
+                        "fps", round(float(override_cfg.get("step_frequency", 30.0)))
+                    )
+                ),
+                image_height=int(override_cfg.get("image_height", 224)),
+                image_width=int(override_cfg.get("image_width", 224)),
+                use_videos=bool(recording.get("use_videos", True)),
+                image_writer_threads=int(recording.get("image_writer_threads", 4)),
+                image_writer_processes=int(recording.get("image_writer_processes", 0)),
+                resume=bool(recording.get("resume", False)),
+            )
+    except Exception:
+        # Recorder 构造失败时，ArxX5DualEnv 已把双臂停在 start 位；异常若直接
+        # 逃出 EnvWorker.__init__，Ray 会回收 worker 进程而跳过 close()，
+        # 电机失去力矩导致双臂下坠。先尽力回 home 再原样抛出。close() 内部
+        # 会记录自身的失败，这里不再重复打日志。
+        try:
+            env.close()
+        except Exception:
+            pass
+        raise
     if control and bool(control.get("enabled", False)):
         env = KeyboardEvalControlWrapper(
             env,
