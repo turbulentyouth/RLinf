@@ -110,7 +110,7 @@ env:
       reset_wait_seconds: 2000.0
     recording:
       # Equivalent to xense-openpi bi_arx5_real --record.
-      enabled: true
+      enabled: false
       # Equivalent to --record_repo_id; defaults to the LeRobot cache.
       repo_id: "xijingfeng/stack_cubes_0728"
       # null uses the LeRobot default; an absolute path matches --record_root.
@@ -174,4 +174,4 @@ rollout:
       add_value_head: ${rollout.model.add_value_head}
     openpi_data:
       repo_id: Xense/stack_cubes_0722
-      norm_stats_path: /home/li/hubo/RLinf/79999_torch/assets/Xense/stack_cubes_0722
+      norm_stats_path: /home/li/hubo/xense-openpi/checkpoints/79999/assets/Xense/stack_cubes_0722

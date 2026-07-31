@@ -503,7 +503,7 @@ _CONFIGS = [
             # π0.5 base 和现有 BiARX5 SFT 配置使用 50 步训练动作块。真机初期
             # 可以只执行动作块的第 1 步，再读取新观测重新推理。
             action_horizon=50,
-            discrete_state_input=False,
+            discrete_state_input=True,
         ),
         data=ArxX5DualDataConfig(
             repo_id="arx_x5_dual",
