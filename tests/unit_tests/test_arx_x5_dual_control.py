@@ -281,6 +281,28 @@ def test_unsafe_policy_action_raises_without_clipping():
         env.close()
 
 
+def test_config_passes_through_manual_episode_control_only():
+    """override_cfg may carry manual_episode_control_only; default stays off."""
+
+    env = ArxX5DualEnv({"is_dummy": True, "step_frequency": 1000.0})
+    try:
+        assert env.config.manual_episode_control_only is False
+    finally:
+        env.close()
+
+    env = ArxX5DualEnv(
+        {
+            "is_dummy": True,
+            "step_frequency": 1000.0,
+            "manual_episode_control_only": True,
+        }
+    )
+    try:
+        assert env.config.manual_episode_control_only is True
+    finally:
+        env.close()
+
+
 def test_hardware_dry_run_intercepts_action_before_safety_check(monkeypatch):
     """The reference dry-run wrapper bypasses the real environment action path."""
 

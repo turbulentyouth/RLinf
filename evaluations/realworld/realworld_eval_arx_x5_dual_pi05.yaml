@@ -120,6 +120,9 @@ env:
     override_cfg:
       dry_run: ${run_modes.${run_mode}.dry_run}
       is_dummy: ${run_modes.${run_mode}.is_dummy}
+      # true 让外层 RealWorldEnv 透传键盘 Wrapper 上报的 truncated 信号；
+      # 为 false 时左/右键中断不会触发 auto_reset（机械臂停住、推理空转）。
+      manual_episode_control_only: true
       left_interface: ${oc.env:ARX_LEFT_INTERFACE,can1}
       right_interface: ${oc.env:ARX_RIGHT_INTERFACE,can3}
       head_camera_serial: ${oc.env:ARX_HEAD_CAMERA_SERIAL,230322271365} # 230322271365

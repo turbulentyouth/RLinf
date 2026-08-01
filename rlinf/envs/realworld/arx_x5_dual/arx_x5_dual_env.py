@@ -151,6 +151,10 @@ class ArxX5DualRobotConfig:
         dry_run: 为 True 时仍按参考流程完成 SDK 回零、start 和普通位置控制，
             但模型动作只记录，不调用 ``set_joint_cmd``。
         is_dummy: 为 True 时不连接机械臂和相机，使用零图像和内存状态测试链路。
+        manual_episode_control_only: 为 True 时，外层 ``RealWorldEnv`` 保留
+            （不用超时步数覆盖）键盘 Wrapper 上报的 truncated 信号，使
+            ``KeyboardEvalControlWrapper`` 的左/右键中断能够触发 auto_reset。
+            本环境自身不读取该值，仅作为配置透传字段存在。
         start_position: 每次 reset 执行的参考双臂起始位。
         home_position: 环境关闭前必定执行的双臂回零目标。
     """
@@ -182,6 +186,7 @@ class ArxX5DualRobotConfig:
     skip_interface_check: bool = False
     dry_run: bool = False
     is_dummy: bool = False
+    manual_episode_control_only: bool = False
     start_position: ArxX5DualStartPositionConfig | dict[str, Any] = field(
         default_factory=ArxX5DualStartPositionConfig
     )
