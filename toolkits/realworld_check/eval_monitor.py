@@ -11,22 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Robot-side live status panel for real-world evaluation.
+"""Robot-side live event log for real-world evaluation.
 
 Tails the JSONL event file written by ``rlinf.utils.eval_events.emit_event``
 (env worker, keyboard wrapper, robot env hooks), reads the operator's pedal
-key presses locally via evdev, derives the current eval phase (inference
-wait / reset wait / homing / ...), and renders a live terminal panel. Every
-received event (RLinf's and local key presses) is also appended to a record
-file for post-hoc analysis.
+key presses locally via evdev, and prints every event as a timestamped line
+as it arrives. Phase transitions (inference wait / reset wait / homing /
+moving to the start pose / ...) and stall warnings are printed as extra
+lines. While an episode is being saved (between ``recording_save_start``
+and ``recording_saved``), an animated in-place progress line is shown on a
+tty and erased when the save completes. Every received event (RLinf's
+and local key presses) is also appended to a record file for post-hoc
+analysis.
 
 Usage (run on the robot node, node 1, inside the RLinf venv)::
 
-    # live panel (follows /tmp/rlinf_eval_events_latest.jsonl, auto-detect keyboard)
+    # follow /tmp/rlinf_eval_events_latest.jsonl, auto-detect keyboard
     python toolkits/realworld_check/eval_monitor.py
 
-    # ssh / no tty: line-by-line output instead of the panel
-    python toolkits/realworld_check/eval_monitor.py --plain --from-start
+    # replay an existing file from the beginning
+    python toolkits/realworld_check/eval_monitor.py --from-start
 
     # specify the pedal device explicitly
     RLINF_KEYBOARD_DEVICE=/dev/input/by-id/... python toolkits/realworld_check/eval_monitor.py
@@ -56,14 +60,16 @@ DEFAULT_EVENT_FILE = "/tmp/rlinf_eval_events_latest.jsonl"
 
 KEYBOARD_POLL_S = 0.05
 FILE_POLL_S = 0.1
-REDRAW_S = 0.2
+WATCHDOG_POLL_S = 1.0
 STALLED_S = 60.0
-RECENT_EVENTS_SHOWN = 8
-MAX_LINE_WIDTH = 80
+SAVE_BAR_REDRAW_S = 0.1
+SAVE_BAR_WIDTH = 30
+SAVE_BAR_BLOCK = 8
 
-# Phase names (panel first line).
+# Phase names (derived from the event stream).
 PHASE_CLOSING = "CLOSING"
 PHASE_HOMING = "HOMING"
+PHASE_TO_START = "TO_START_POSE"
 PHASE_RESET_WAIT = "RESET_WAIT"
 PHASE_IDLE_WAIT = "IDLE_WAIT_PEDAL"
 PHASE_WAITING_INFERENCE = "WAITING_INFERENCE"
@@ -130,119 +136,88 @@ class _MonitorState:
 
     def __init__(self):
         self.last_ts_by_event: dict[str, float] = {}
-        self.last_rlinf_event: dict[str, Any] | None = None
-        self.last_key_event: dict[str, Any] | None = None
-        self.last_actions: dict[str, Any] | None = None
-        self.last_reset_wait: dict[str, Any] | None = None
+        self.last_rlinf_ts: float | None = None
         self.evaluate_count = 0
-        self.recent: list[dict[str, Any]] = []
+        self.current_phase = PHASE_UNKNOWN
 
     def ingest(self, record: dict[str, Any], recv_ts: float) -> None:
         record.setdefault("ts", recv_ts)
         event = str(record.get("event", ""))
         self.last_ts_by_event[event] = record["ts"]
-        if record.get("src") == "monitor":
-            self.last_key_event = record
-        else:
-            self.last_rlinf_event = record
-        if event == "actions_received":
-            self.last_actions = record
-        elif event == "reset_wait_start":
-            self.last_reset_wait = record
-        elif event == "evaluate_start":
+        if record.get("src") != "monitor":
+            self.last_rlinf_ts = record["ts"]
+        if event == "evaluate_start":
             self.evaluate_count += 1
-            self.last_actions = None  # new cycle: reset chunk progress
-        self.recent.append(record)
-        del self.recent[:-RECENT_EVENTS_SHOWN]
 
     def _ts(self, event: str) -> float:
         return self.last_ts_by_event.get(event, 0.0)
 
-    def phase(self) -> tuple[str, float | None]:
-        """Return (phase_name, reset_wait_remaining_s_or_None)."""
+    def update_phase(self) -> bool:
+        """Recompute the phase; return True when it changed."""
+        new_phase = self._derive_phase()
+        changed = new_phase != self.current_phase
+        self.current_phase = new_phase
+        return changed
+
+    def _derive_phase(self) -> str:
         if self._ts("homing_start") > self._ts("homing_done") and self._ts(
             "homing_start"
         ) >= self._ts("close_envs_start"):
-            return PHASE_HOMING, None
+            return PHASE_HOMING
         if self._ts("close_envs_start") > self._ts("close_envs_done"):
-            return PHASE_CLOSING, None
+            return PHASE_CLOSING
         if self._ts("reset_wait_start") > self._ts("reset_wait_end"):
-            remaining = None
-            if self.last_reset_wait is not None:
-                seconds = float(self.last_reset_wait.get("seconds", 0.0))
-                deadline = self.last_reset_wait["ts"] + seconds
-                # Event ts and local clock may differ across hosts; clamp.
-                remaining = max(0.0, deadline - time.time())
-            return PHASE_RESET_WAIT, remaining
+            return PHASE_RESET_WAIT
         if self._ts("idle_wait_start") > self._ts("idle_wait_end"):
-            return PHASE_IDLE_WAIT, None
+            return PHASE_IDLE_WAIT
+        if self._ts("go_start_start") > self._ts("go_start_done"):
+            return PHASE_TO_START
         if self._ts("obs_sent") > self._ts("actions_received"):
-            return PHASE_WAITING_INFERENCE, None
+            return PHASE_WAITING_INFERENCE
         if self._ts("actions_received") > 0.0:
-            return PHASE_STEPPING, None
-        return PHASE_UNKNOWN, None
+            return PHASE_STEPPING
+        return PHASE_UNKNOWN
+
+
+def _format_ts(ts: float) -> str:
+    """Wall-clock timestamp with milliseconds, e.g. ``12:34:56.789``."""
+    return time.strftime("%H:%M:%S", time.localtime(ts)) + f".{int(ts % 1 * 1000):03d}"
 
 
 def _format_event_line(record: dict[str, Any]) -> str:
-    ts = float(record.get("ts", 0.0))
-    stamp = time.strftime("%H:%M:%S", time.localtime(ts))
+    stamp = _format_ts(float(record.get("ts", 0.0)))
     extras = " ".join(
         f"{k}={v}"
         for k, v in record.items()
         if k not in ("ts", "src", "event", "recv_ts")
     )
-    line = f"{stamp} {record.get('src', '?')} {record.get('event', '?')}"
+    line = f"[{stamp}] {record.get('src', '?'):<8} {record.get('event', '?')}"
     if extras:
-        line += f" {extras}"
-    return line[:MAX_LINE_WIDTH]
+        line += f"  {extras}"
+    return line
 
 
-def _age(now: float, ts: float | None) -> str:
-    if ts is None:
-        return "-"
-    return f"{max(0.0, now - ts):.1f}s ago"
+def _render_save_bar(now: float, elapsed: float, frames: Any) -> str:
+    """Indeterminate bouncing-block progress line for an ongoing episode save.
 
-
-def _render_panel(state: _MonitorState, now: float) -> str:
-    phase, remaining = state.phase()
-    phase_line = f"Phase: {phase}"
-    if phase == PHASE_RESET_WAIT and remaining is not None:
-        phase_line += f"  (remaining {remaining:.1f}s)"
-
-    last = state.last_rlinf_event
-    if last is not None:
-        last_line = (
-            f"Last RLinf event: {last.get('event', '?')}  ({_age(now, last['ts'])})"
-        )
-        if phase != PHASE_RESET_WAIT and now - last["ts"] > STALLED_S:
-            last_line += "  *** STALLED ***"
-    else:
-        last_line = "Last RLinf event: -"
-
-    key = state.last_key_event
-    if key is not None:
-        key_line = f"Last key: {key.get('key', '?')}  ({_age(now, key['ts'])})"
-    else:
-        key_line = "Last key: -"
-
-    if state.last_actions is not None:
-        chunk = state.last_actions.get("chunk", "?")
-        n_chunks = state.last_actions.get("n_chunks", "?")
-        progress = f"Chunks this episode: {chunk}/{n_chunks}"
-    else:
-        progress = "Chunks this episode: -"
-    progress += f"    Cycle/evaluate count: {state.evaluate_count}"
-
-    lines = [
-        "=== RLinf Eval Monitor (robot side) ===",
-        phase_line,
-        last_line,
-        key_line,
-        progress,
-        "--- recent events ---",
-    ]
-    lines.extend(_format_event_line(r) for r in reversed(state.recent))
-    return "\n".join(line[:MAX_LINE_WIDTH] for line in lines)
+    LeRobot's ``save_episode`` reports no percentage, so the bar animates a
+    highlight sliding back and forth and shows wall-clock elapsed time.
+    """
+    span = SAVE_BAR_WIDTH - SAVE_BAR_BLOCK
+    period = 2 * span
+    pos = int(elapsed * 15) % period
+    if pos > span:
+        pos = period - pos
+    cells = ["."] * SAVE_BAR_WIDTH
+    for i in range(SAVE_BAR_BLOCK):
+        cells[pos + i] = "#"
+    line = (
+        f"[{_format_ts(now)}] recorder  saving episode "
+        f"|{''.join(cells)}| {elapsed:.1f}s"
+    )
+    if frames is not None:
+        line += f" ({frames} frames)"
+    return line
 
 
 def _open_keyboard(no_keyboard: bool):
@@ -280,7 +255,7 @@ def _default_record_path() -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Robot-side live status monitor for real-world evaluation.",
+        description="Robot-side live event log for real-world evaluation.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -314,11 +289,6 @@ def main() -> None:
         help="Do not read the local keyboard/pedal.",
     )
     ap.add_argument(
-        "--plain",
-        action="store_true",
-        help="Print events line-by-line instead of the ANSI panel (ssh/no tty).",
-    )
-    ap.add_argument(
         "--from-start",
         action="store_true",
         help="Read the event file from the beginning (default: tail new only).",
@@ -343,7 +313,20 @@ def main() -> None:
         )
         record_file = None
 
+    bar_enabled = sys.stdout.isatty()
+    saving_since: float | None = None
+    saving_frames: Any = None
+
+    def emit(line: str) -> None:
+        # The save bar lives on the current line without a newline; erase it
+        # before printing so lines never interleave. It redraws on the next
+        # bar tick (unless the save just ended).
+        if saving_since is not None and bar_enabled:
+            sys.stdout.write("\r\033[K")
+        print(line, flush=True)
+
     def ingest(record: dict[str, Any]) -> None:
+        nonlocal saving_since, saving_frames
         recv_ts = time.time()
         state.ingest(record, recv_ts)
         if record_file is not None:
@@ -354,16 +337,31 @@ def main() -> None:
                 + "\n"
             )
             record_file.flush()
-        if args.plain:
-            print(_format_event_line(record), flush=True)
+        emit(_format_event_line(record))
+        if state.update_phase():
+            emit(
+                f"[{_format_ts(recv_ts)}] --- phase -> {state.current_phase} "
+                f"(eval #{state.evaluate_count}) ---"
+            )
+        event = record.get("event")
+        if record.get("src") != "monitor":
+            if event == "recording_save_start":
+                saving_since = float(record.get("ts", recv_ts))
+                saving_frames = record.get("frames")
+            elif event in ("recording_saved", "recording_discarded"):
+                # Save finished; the bar line was already erased by emit().
+                saving_since = None
+                saving_frames = None
 
-    if not args.plain:
-        # Hide cursor; restored in the finally block.
-        sys.stdout.write("\033[?25l")
-        sys.stdout.flush()
+    emit(
+        f"[{_format_ts(time.time())}] monitor  start  "
+        f"event_file={args.event_file} record={args.record}"
+    )
 
     last_file_poll = 0.0
-    last_redraw = 0.0
+    last_watchdog = 0.0
+    last_bar_draw = 0.0
+    stall_warned = False
     try:
         while True:
             now = time.time()
@@ -381,16 +379,41 @@ def main() -> None:
                 last_file_poll = now
                 for record in tail.read_new():
                     ingest(record)
-            if not args.plain and now - last_redraw >= REDRAW_S:
-                last_redraw = now
-                sys.stdout.write("\033[2J\033[H" + _render_panel(state, now) + "\n")
+                    stall_warned = False
+            if now - last_watchdog >= WATCHDOG_POLL_S:
+                last_watchdog = now
+                last_rlinf_ts = state.last_rlinf_ts
+                if (
+                    not stall_warned
+                    and saving_since is None  # saving is a legit quiet period
+                    and last_rlinf_ts is not None
+                    and state.current_phase != PHASE_RESET_WAIT
+                    and now - last_rlinf_ts > STALLED_S
+                ):
+                    stall_warned = True
+                    emit(
+                        f"[{_format_ts(now)}] *** STALLED: no RLinf event for "
+                        f"{now - last_rlinf_ts:.1f}s "
+                        f"(phase={state.current_phase}) ***"
+                    )
+            if (
+                saving_since is not None
+                and bar_enabled
+                and now - last_bar_draw >= SAVE_BAR_REDRAW_S
+            ):
+                last_bar_draw = now
+                sys.stdout.write(
+                    "\r\033[K"
+                    + _render_save_bar(now, now - saving_since, saving_frames)
+                )
                 sys.stdout.flush()
             time.sleep(KEYBOARD_POLL_S)
     except KeyboardInterrupt:
         pass
     finally:
-        if not args.plain:
-            sys.stdout.write("\033[?25h\n")
+        if saving_since is not None and bar_enabled:
+            # Delete the in-place bar so the shell prompt starts clean.
+            sys.stdout.write("\r\033[K")
             sys.stdout.flush()
         if record_file is not None:
             record_file.close()
