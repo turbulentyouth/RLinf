@@ -392,9 +392,11 @@ class ArxX5DualEnv(gym.Env):
                 preview_time=self.config.command_preview_time,
             )
             time.sleep(self.config.controller_warmup_time)
+            emit_event("homing_start", "env")
             self._left_controller.reset_to_home()
             self._right_controller.reset_to_home()
             self._set_dual_gravity_compensation()
+            emit_event("homing_done", "env")
         except Exception:
             self._left_controller.close()
             controller = getattr(self, "_right_controller", None)
@@ -796,9 +798,11 @@ class ArxX5DualEnv(gym.Env):
 
         if self.config.is_dummy:
             return
+        emit_event("go_start_start", "env")
         self._move_to_position(
             self.config.start_position, position_name="Start position"
         )
+        emit_event("go_start_done", "env")
         self._logger.info("Successfully reached the BiARX5 start position")
 
     def _smooth_go_home(self) -> None:

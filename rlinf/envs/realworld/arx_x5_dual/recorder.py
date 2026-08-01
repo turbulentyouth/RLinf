@@ -12,6 +12,7 @@ from typing import Any, Mapping
 import numpy as np
 import packaging.version
 
+from rlinf.utils.eval_events import emit_event
 from rlinf.utils.logging import get_logger
 
 _STATE_NAMES = (
@@ -287,6 +288,8 @@ class ArxX5DualLeRobotRecorder:
     ) -> None:
         """Add one pre-action observation and its executed absolute action."""
 
+        if self._frame_count == 0:
+            emit_event("recording_start", "recorder", task=self._task)
         state = observation["state"]["joint_position"]
         frames = observation["frames"]
         frame = {
@@ -308,8 +311,10 @@ class ArxX5DualLeRobotRecorder:
             self._logger.warning("ARX recording episode is empty; nothing was saved.")
             return
         frame_count = self._frame_count
+        emit_event("recording_save_start", "recorder", frames=frame_count)
         self._dataset.save_episode()
         self._frame_count = 0
+        emit_event("recording_saved", "recorder", frames=frame_count)
         self._logger.info("Saved ARX LeRobot episode with %d frames.", frame_count)
 
     def discard_episode(self, reason: str) -> None:
@@ -323,6 +328,9 @@ class ArxX5DualLeRobotRecorder:
             image_writer.wait_until_done()
         self._dataset.clear_episode_buffer()
         self._frame_count = 0
+        emit_event(
+            "recording_discarded", "recorder", frames=frame_count, reason=reason
+        )
         self._logger.info(
             "Discarded ARX LeRobot episode with %d frames (%s).",
             frame_count,
