@@ -1,0 +1,228 @@
+# ARX X5 dual-arm asynchronous PPO with human success/failure labels.
+#
+# At 30 Hz, one rollout segment contains 1800 primitive environment steps
+# (36 OpenPI action chunks of 50 steps). The actor waits for five on-policy
+# segments before every PPO update, for 180 fixed chunk-level slots.
+
+defaults:
+  - env/realworld_arx_x5_dual_joint@env.train
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    actor:
+      node_group: inference
+      placement: 0
+    rollout:
+      node_group: inference
+      placement: 0
+    env:
+      node_group: robot
+      placement: 0
+  node_groups:
+    - label: inference
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      env_configs:
+        - node_ranks: 1
+          python_interpreter_path: /home/xi/Downloads/RLinf/.venv/bin/python3
+          env_vars:
+            - RLINF_KEYBOARD_DEVICE: /dev/input/by-id/usb-ITE_Tech._Inc._ITE_Device_8258_-event-kbd
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: arx-x5-dual-openpi
+    experiment_name: "realworld-arx-x5-dual-async-ppo-pi05"
+    logger_backends: ["tensorboard"]
+
+  # Each global step is one PPO update after five rollout segments.
+  max_epochs: 8000
+  max_steps: -1
+  only_eval: false
+  val_check_interval: -1
+  save_interval: 1
+  weight_sync_interval: 1
+  use_training_pipeline: false
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  adv_type: gae
+  loss_type: decoupled_actor_critic
+  normalize_advantages: true
+  group_size: 1
+
+  # Keep exactly five trajectories from the current policy version. After an
+  # update, version-0 trajectories are removed before collecting version 1.
+  rollout_store_size_per_rank: 5
+  staleness_threshold: 0
+  on_policy_min_ratio: 1.0
+  behave_weight_threshold: 2.0
+
+  reward_type: chunk_level
+  logprob_type: chunk_level
+  entropy_type: chunk_level
+  update_epoch: 2
+  loss_agg_func: "token-mean"
+
+  gamma: 0.99
+  gae_lambda: 0.95
+  reward_coef: 1.0
+  kl_penalty: kl
+  kl_beta: 0.0
+  entropy_bonus: 0.0
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 0.2
+  huber_delta: 10.0
+
+  # Negative step and failure rewards are intentional and must not be filtered.
+  filter_rewards: false
+  rewards_lower_bound: -2.0
+  rewards_upper_bound: 0.0
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: false
+  train:
+    rollout_epoch: 1
+    total_num_envs: 1
+    group_size: 1
+    # Keep one operator-controlled episode per rollout segment. After a terminal
+    # key, the remaining fixed-horizon slots are padded and masked from PPO.
+    auto_reset: false
+    ignore_terminations: false
+    max_episode_steps: 1800
+    max_steps_per_rollout_epoch: 1800
+
+    episode_control:
+      enabled: true
+      # After reset, right arrow starts the next episode before this timeout.
+      reset_wait_seconds: 2000.0
+      reward:
+        enabled: true
+        mode: normalized_step_penalty
+        success_keys: ["Key.right"]
+        failure_keys: ["Key.left"]
+        # Ordinary steps are computed as -1 / max_episode_steps.
+        success_reward: 0.0
+        failure_reward: -1.0
+        timeout_reward: -1.0
+
+    # PPO only needs the transition stream. Enable recording separately if the
+    # same run should also create a LeRobot dataset.
+    recording:
+      enabled: false
+
+    override_cfg:
+      dry_run: false
+      is_dummy: false
+      left_interface: ${oc.env:ARX_LEFT_INTERFACE,can1}
+      right_interface: ${oc.env:ARX_RIGHT_INTERFACE,can3}
+      head_camera_serial: ${oc.env:ARX_HEAD_CAMERA_SERIAL,230322271365}
+      left_wrist_camera_serial: ${oc.env:ARX_LEFT_CAMERA_SERIAL,230422271416}
+      right_wrist_camera_serial: ${oc.env:ARX_RIGHT_CAMERA_SERIAL,230322274234}
+      task_description: "centre the blue cube, stack green cube on top of the blue cube, stack yellow cube on top of the green cube, stack red cube on top of the yellow cube."
+      max_num_steps: 1800
+      step_frequency: 30.0
+      start_position:
+        left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+        right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
+        left_gripper: 1.57
+        right_gripper: 1.57
+        duration: 2.0
+      home_position:
+        left_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        right_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        left_gripper: 0.0
+        right_gripper: 0.0
+        duration: null
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: false
+  collect_prev_infos: true
+  enable_offload: false
+  pipeline_stage_num: 1
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  # 5 segments * (1800 / 50) chunks = 180 fixed slots. A global batch of 60
+  # produces three optimizer steps per PPO epoch; post-terminal slots are masked.
+  micro_batch_size: 1
+  global_batch_size: 60
+  seed: 0
+  enable_offload: false
+
+  model:
+    # This must be an already converted Torch/OpenPI checkpoint. train_async.py
+    # does not run the JAX-to-Torch conversion used by the evaluation launcher.
+    model_path: ${oc.env:ARX_PI05_CHECKPOINT,/home/li/hubo/RLinf/60000_torch}
+    model_type: "openpi"
+    num_action_chunks: 50
+    action_dim: 14
+    num_steps: 5
+    add_value_head: true
+    openpi:
+      config_name: "pi05_arx_x5_dual"
+      num_images_in_input: 3
+      train_expert_only: true
+      value_after_vlm: true
+      detach_critic_input: true
+      noise_method: "flow_noise"
+      noise_params: [0.16, 0.12, 200]
+      joint_logprob: true
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}
+      add_value_head: ${actor.model.add_value_head}
+    openpi_data:
+      repo_id: ${oc.env:ARX_SFT_REPO_ID,Xense/stack_cubes_0722}
+      norm_stats_path: ${oc.env:ARX_NORM_STATS_PATH,/home/li/hubo/RLinf/60000/assets/Xense/stack_cubes_0722}
+
+  optim:
+    lr: 1.0e-6
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-5
+    weight_decay: 0.01
+    clip_grad: 1.0
+    critic_warmup_steps: 2
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: false
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  # The PPO critic is the value head attached to actor.model.
+  use_critic_model: false

@@ -384,24 +384,89 @@ ARX X5 双臂持续推理
 
    env:
      eval:
-       max_steps_per_rollout_epoch: 5
-       override_cfg:
-         start_position:
+       max_episode_steps: 1800
+       max_steps_per_rollout_epoch: 1800
+       episode_control:
+         enabled: true
+         reset_wait_seconds: 2000.0
+         reward:
            enabled: true
-           move_in_hardware_dry_run: false
+           mode: normalized_step_penalty
+           success_keys: ["Key.right"]
+           failure_keys: ["Key.left"]
+           success_reward: 0.0
+           failure_reward: -1.0
+           timeout_reward: -1.0
+       override_cfg:
+         step_frequency: 30.0
+         max_num_steps: 1800
+         start_position:
            left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
            right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
-           duration: 30.0
+           duration: 2.0
 
 可选值为 ``real``、``hardware_dry_run`` 和 ``distributed_dry_run``。
-start position 只在第一次模型推理前移动一次。后续持续推理周期保留机械臂
-当前位置，不会反复返回起始位。hardware dry-run 配置将
-``move_in_hardware_dry_run`` 设为 ``true``：只允许这一次受保护的初始化移动，
-随后双臂恢复阻尼模式，所有模型动作仍被禁止下发。distributed dry-run 则关闭
-start position 移动。
+real 模式按 30 Hz 运行 60 秒，对应 1800 个 primitive environment step。
+episode 运行期间使用以下稀疏奖励：
 
-按 ``Ctrl+C`` 可停止持续推理。RLinf 会等待当前五步短周期完成，关闭真机环境，
-并让 ARX 控制器进入阻尼/被动模式。
+.. math::
+
+   r_t = \begin{cases}
+     -1/1800, & \text{普通步骤} \\
+     0, & \text{右方向键：成功} \\
+     -1, & \text{左方向键：失败，或达到超时。}
+   \end{cases}
+
+reset 等待阶段可按右方向键提前开始下一条 episode。推理阶段按右方向键会标记
+成功并保存录制的 episode；按左方向键会标记失败并丢弃录制。达到 1800 步时
+自动标记为超时失败，并丢弃未完成的录制。episode 在一个 50-action chunk 中途
+结束后，chunk 剩余位置只做 padding，不会继续向机械臂下发动作。
+
+按 ``Esc`` 请求优雅退出，也可以按 ``Ctrl+C`` 停止 driver。RLinf 随后关闭真机
+环境，并让 ARX 控制器进入阻尼/被动模式。
+
+该命令启动的是 ``EmbodiedEvalRunner``：它可以记录 reward、return、success
+和 episode length，用于验证奖励链路，但**不会**运行 PPO，也不会更新模型
+checkpoint。
+
+ARX X5 双臂 Async PPO
+----------------------
+
+专用训练配置
+``examples/embodiment/config/realworld_arx_x5_dual_async_ppo_pi05.yaml``
+会把同一套键盘奖励接入 ``AsyncPPOEmbodiedRunner``。初始 checkpoint 必须已经
+转换为 Torch/OpenPI 格式；这个训练入口不会执行评测启动器中的 JAX 到 Torch
+转换。
+
+在推理节点设置 checkpoint 和归一化统计，然后只在 Ray head 上启动脚本：
+
+.. code-block:: bash
+
+   export ARX_PI05_CHECKPOINT=/home/li/hubo/RLinf/60000_torch
+   export ARX_NORM_STATS_PATH=/home/li/hubo/RLinf/60000/assets/Xense/stack_cubes_0722
+   export ARX_SFT_REPO_ID=Xense/stack_cubes_0722
+
+   bash examples/embodiment/run_realworld_async.sh \
+       realworld_arx_x5_dual_async_ppo_pi05
+
+episode 的人工控制方式与持续推理完全一致：运行中按右方向键标记成功，按左方向
+键标记失败；reset 等待期间按右方向键开始下一条 episode。环境在普通步骤输出
+``-1/1800``，成功输出 ``0``，失败或超时输出 ``-1``；不会启动独立的 reward
+model worker。
+
+训练配置关闭了 ``auto_reset``，因此一条人工控制的 episode 对应一个 rollout
+segment。每个 segment 固定容纳 1800 个 primitive step，即 36 个 action chunk；
+如果人工提前结束，剩余位置会 padding，并由 PPO loss mask 排除。actor 的
+priority store 会等待 5 个模型版本等于当前版本的 segment，然后计算 GAE、
+归一化 advantage，并在 180 个固定 chunk 位置上执行两个 PPO epoch；更新后的
+权重会同步给 rollout worker，同时写入 ``checkpoints/global_step_<N>/``。因此，
+人工按键会结束 episode，但不会在按键瞬间更新模型；第 5 个完整 rollout
+segment 到达 actor 后才开始更新。
+
+默认 placement 会把 actor 和 rollout 放在推理节点的 GPU 0。如果同一张 GPU
+放不下两份 OpenPI 模型，需要先把 ``actor`` 和 ``rollout`` 改到不同 GPU，再在
+真机上启动。收集未完成时按 ``Ctrl+C`` 不会把部分 segment 保存成 checkpoint；
+恢复训练时使用最近一个完整的 ``global_step_<N>``。
 
 查看结果
 --------

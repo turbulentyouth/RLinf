@@ -4,6 +4,7 @@ from collections import deque
 
 import gymnasium as gym
 
+from rlinf.envs.realworld.arx_x5_dual.tasks import _episode_reward_kwargs
 from rlinf.envs.realworld.common.wrappers import keyboard_eval_control_wrapper as module
 
 
@@ -34,14 +35,33 @@ class _Env(gym.Env):
         return {"obs": self.reset_calls}, 0.0, False, self.truncated, {}
 
 
+class _Recorder:
+    def __init__(self):
+        self.frames = 0
+        self.saved = 0
+        self.discarded: list[str] = []
+
+    def add_frame(self, observation, action):
+        del observation, action
+        self.frames += 1
+
+    def save_episode(self):
+        self.saved += 1
+
+    def discard_episode(self, reason):
+        self.discarded.append(reason)
+
+
 def _wrapper(monkeypatch, env, **kwargs):
     monkeypatch.setattr(module, "KeyboardListener", _Listener)
     return module.KeyboardEvalControlWrapper(
         env,
-        start_keys=(),
-        success_keys=(),
-        failure_keys=(),
-        interrupt_keys=("Key.left", "Key.right"),
+        start_keys=kwargs.pop("start_keys", ()),
+        success_keys=kwargs.pop("success_keys", ()),
+        failure_keys=kwargs.pop("failure_keys", ()),
+        interrupt_keys=kwargs.pop(
+            "interrupt_keys", ("Key.left", "Key.right")
+        ),
         reset_wait_seconds=kwargs.pop("reset_wait_seconds", 0.0),
         continue_key="Key.right",
         preserve_env_done=True,
@@ -121,3 +141,133 @@ def test_pending_exit_skips_reset_wait_entirely(monkeypatch):
 
     assert wrapper.exit_requested is True
     assert wrapper._running is False
+
+
+def test_normalized_step_penalty_is_emitted_while_running(monkeypatch):
+    wrapper = _wrapper(
+        monkeypatch,
+        _Env(),
+        step_reward=-1.0 / 1800,
+        success_reward=0.0,
+        failure_reward=-1.0,
+        timeout_reward=-1.0,
+    )
+    _Listener.events = deque([[], []])
+    wrapper.reset()
+
+    _, reward, terminated, truncated, info = wrapper.step(None)
+
+    assert reward == -1.0 / 1800
+    assert terminated is False
+    assert truncated is False
+    assert info["success"] is False
+    assert info["terminal_reason"] == "running"
+    assert info["episode_step"] == 1
+
+
+def test_success_key_uses_zero_reward_and_saves_episode(monkeypatch):
+    recorder = _Recorder()
+    wrapper = _wrapper(
+        monkeypatch,
+        _Env(),
+        success_keys=("Key.right",),
+        save_keys=("Key.right",),
+        episode_recorder=recorder,
+        step_reward=-1.0 / 1800,
+        success_reward=0.0,
+        failure_reward=-1.0,
+        timeout_reward=-1.0,
+    )
+    _Listener.events = deque([[], ["Key.right"]])
+    wrapper.reset()
+
+    _, reward, terminated, truncated, info = wrapper.step(None)
+
+    assert reward == 0.0
+    assert terminated is True
+    assert truncated is False
+    assert info["success"] is True
+    assert info["terminal_reason"] == "success"
+    assert recorder.frames == 1
+    assert recorder.saved == 1
+
+    _, padded_reward, padded_terminated, padded_truncated, padded_info = wrapper.step(
+        None
+    )
+    assert padded_reward == 0.0
+    assert padded_terminated is False
+    assert padded_truncated is False
+    assert padded_info["success"] is True
+    assert padded_info["episode_step"] == 1
+    assert recorder.frames == 1
+
+
+def test_failure_key_uses_negative_reward_and_discards_episode(monkeypatch):
+    recorder = _Recorder()
+    wrapper = _wrapper(
+        monkeypatch,
+        _Env(),
+        failure_keys=("Key.left",),
+        discard_keys=("Key.left",),
+        episode_recorder=recorder,
+        step_reward=-1.0 / 1800,
+        success_reward=0.0,
+        failure_reward=-1.0,
+        timeout_reward=-1.0,
+    )
+    _Listener.events = deque([[], ["Key.left"]])
+    wrapper.reset()
+
+    _, reward, terminated, truncated, info = wrapper.step(None)
+
+    assert reward == -1.0
+    assert terminated is True
+    assert truncated is False
+    assert info["success"] is False
+    assert info["terminal_reason"] == "failure"
+    assert recorder.discarded == ["failure key pressed"]
+
+
+def test_timeout_uses_failure_reward_and_discards_episode(monkeypatch):
+    recorder = _Recorder()
+    wrapper = _wrapper(
+        monkeypatch,
+        _Env(truncated=True),
+        episode_recorder=recorder,
+        step_reward=-1.0 / 1800,
+        success_reward=0.0,
+        failure_reward=-1.0,
+        timeout_reward=-1.0,
+    )
+    _Listener.events = deque([[], []])
+    wrapper.reset()
+
+    _, reward, terminated, truncated, info = wrapper.step(None)
+
+    assert reward == -1.0
+    assert terminated is False
+    assert truncated is True
+    assert info["success"] is False
+    assert info["terminal_reason"] == "timeout"
+    assert recorder.discarded == ["episode timed out"]
+
+
+def test_arx_reward_config_derives_step_penalty_from_episode_horizon():
+    kwargs = _episode_reward_kwargs(
+        {
+            "reward": {
+                "enabled": True,
+                "mode": "normalized_step_penalty",
+                "success_keys": ["Key.right"],
+                "failure_keys": ["Key.left"],
+            }
+        },
+        {"max_episode_steps": 1800},
+    )
+
+    assert kwargs["step_reward"] == -1.0 / 1800
+    assert kwargs["success_reward"] == 0.0
+    assert kwargs["failure_reward"] == -1.0
+    assert kwargs["timeout_reward"] == -1.0
+    assert kwargs["success_keys"] == ("Key.right",)
+    assert kwargs["failure_keys"] == ("Key.left",)

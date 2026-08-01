@@ -196,8 +196,20 @@ class RealWorldEnv(gym.Env):
         self.intervened_steps += intervene_current_step.astype(int)
 
         episode_info["success_once"] = self.success_once.copy()
+        episode_info["success_at_end"] = (
+            success_current_step.astype(bool) & terminations.astype(bool)
+        )
         episode_info["return"] = self.returns.copy()
-        episode_info["episode_len"] = self.elapsed_steps.copy()
+        episode_len = self.elapsed_steps.copy()
+        reported_episode_step = infos.get("episode_step", None)
+        if reported_episode_step is not None:
+            reported_episode_step = self._as_env_vector(
+                reported_episode_step, dtype=np.int32
+            )
+            episode_len = np.where(
+                reported_episode_step > 0, reported_episode_step, episode_len
+            )
+        episode_info["episode_len"] = episode_len
         episode_info["reward"] = episode_info["return"] / episode_info["episode_len"]
         episode_info["intervened_once"] = self.intervened_once
         episode_info["intervened_steps"] = self.intervened_steps
@@ -206,6 +218,19 @@ class RealWorldEnv(gym.Env):
         )
         infos["episode"] = to_tensor(episode_info)
         return infos
+
+    def _as_env_vector(self, value, *, dtype):
+        """Normalize scalar or vector info values to one item per environment."""
+
+        array = np.asarray(value, dtype=dtype)
+        if array.ndim == 0:
+            return np.full(self.num_envs, array.item(), dtype=dtype)
+        if array.size != self.num_envs:
+            raise ValueError(
+                "Real-world info signal must contain one value per environment; "
+                f"got shape {array.shape} for {self.num_envs} envs."
+            )
+        return array.reshape(self.num_envs)
 
     def reset(self, *, reset_state_ids=None, seed=None, options=None, env_idx=None):
         # TODO: handle partial reset
@@ -250,6 +275,11 @@ class RealWorldEnv(gym.Env):
 
         self._elapsed_steps += 1
         raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)
+        reported_episode_step = infos.get("episode_step", None)
+        if reported_episode_step is not None:
+            self._elapsed_steps[:] = self._as_env_vector(
+                reported_episode_step, dtype=np.int32
+            )
         # max_episode_steps: null → external wrapper owns episode end.
         if self.cfg.max_episode_steps is None:
             timeout_truncations = np.zeros_like(truncations, dtype=bool)
@@ -260,7 +290,11 @@ class RealWorldEnv(gym.Env):
 
         obs = self._wrap_obs(raw_obs)
         step_reward = self._calc_step_reward(_reward)
-        success_current_step = np.isclose(step_reward, 1.0)
+        success_signal = infos.get("success", None)
+        if success_signal is None:
+            success_current_step = np.isclose(step_reward, 1.0)
+        else:
+            success_current_step = self._as_env_vector(success_signal, dtype=bool)
         intervene_flag = np.zeros(self.num_envs, dtype=bool)
         if "intervene_action" in infos:
             for env_id in range(self.num_envs):
@@ -275,7 +309,6 @@ class RealWorldEnv(gym.Env):
             infos,
         )
         if self.ignore_terminations:
-            infos["episode"]["success_at_end"] = to_tensor(terminations)
             terminations[:] = False
 
         intervene_action = np.zeros_like(actions)

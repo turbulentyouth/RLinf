@@ -386,27 +386,99 @@ The unified YAML maps the selected mode to the environment safety settings:
 
    env:
      eval:
-       max_steps_per_rollout_epoch: 5
-       override_cfg:
-         start_position:
+       max_episode_steps: 1800
+       max_steps_per_rollout_epoch: 1800
+       episode_control:
+         enabled: true
+         reset_wait_seconds: 2000.0
+         reward:
            enabled: true
-           move_in_hardware_dry_run: false
+           mode: normalized_step_penalty
+           success_keys: ["Key.right"]
+           failure_keys: ["Key.left"]
+           success_reward: 0.0
+           failure_reward: -1.0
+           timeout_reward: -1.0
+       override_cfg:
+         step_frequency: 30.0
+         max_num_steps: 1800
+         start_position:
            left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
            right_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
-           duration: 30.0
+           duration: 2.0
 
 The valid values are ``real``, ``hardware_dry_run``, and
-``distributed_dry_run``. The start-position motion runs only before the first
-model inference. Later
-continuous cycles keep the current robot state and do not return to the start
-position. The ``hardware_dry_run`` mode sets
-``move_in_hardware_dry_run: true``: this permits only the guarded initial
-motion, returns both arms to damping mode, and still suppresses every model
-action. The ``distributed_dry_run`` mode disables start-position motion.
+``distributed_dry_run``. In real mode, 30 Hz for 60 seconds gives an
+1800-primitive-step episode horizon. While an episode is running, the wrapper
+uses the following sparse reward:
 
-Press ``Ctrl+C`` to stop continuous inference. RLinf waits for the current
-five-step cycle to finish, closes the real-world environment, and returns the
-ARX controllers to damping/passive mode.
+.. math::
+
+   r_t = \begin{cases}
+     -1/1800, & \text{ordinary step} \\
+     0, & \text{right arrow: success} \\
+     -1, & \text{left arrow: failure or timeout.}
+   \end{cases}
+
+During reset wait, press the right arrow to begin the next episode early.
+During inference, the right arrow marks success and saves the recorded episode;
+the left arrow marks failure and discards it. Reaching 1800 steps marks a timeout
+failure and also discards the unfinished recording. Remaining positions in the
+current 50-action chunk are padded without sending more robot actions after an
+episode ends.
+
+Press ``Esc`` for a graceful operator-requested exit, or ``Ctrl+C`` to stop the
+driver. RLinf closes the real-world environment and returns the ARX controllers
+to damping/passive mode.
+
+This command runs ``EmbodiedEvalRunner``; it records reward, return, success,
+and episode length for validation, but it does **not** run PPO or update the model
+checkpoint.
+
+ARX X5 Dual-Arm Async PPO
+-------------------------
+
+The dedicated training config
+``examples/embodiment/config/realworld_arx_x5_dual_async_ppo_pi05.yaml``
+connects the same keyboard reward to ``AsyncPPOEmbodiedRunner``. The initial
+checkpoint must already be converted to the Torch/OpenPI format; this training
+entrypoint does not perform the JAX-to-Torch conversion from the evaluation
+launcher.
+
+On the inference node, set the checkpoint and normalization assets, then launch
+the script only from the Ray head:
+
+.. code-block:: bash
+
+   export ARX_PI05_CHECKPOINT=/home/li/hubo/RLinf/60000_torch
+   export ARX_NORM_STATS_PATH=/home/li/hubo/RLinf/60000/assets/Xense/stack_cubes_0722
+   export ARX_SFT_REPO_ID=Xense/stack_cubes_0722
+
+   bash examples/embodiment/run_realworld_async.sh \
+       realworld_arx_x5_dual_async_ppo_pi05
+
+The operator controls each episode exactly as in continuous inference: right
+arrow marks success, left arrow marks failure, and right arrow during reset wait
+starts the next episode. The environment emits ``-1/1800`` on ordinary steps,
+``0`` on success, and ``-1`` on failure or timeout; no separate reward-model
+worker is used.
+
+``auto_reset`` is disabled for training, so one operator-controlled episode maps
+to one rollout segment. Each segment has a fixed capacity of 1800 primitive
+steps, or 36 action chunks. If the operator ends it early, the remaining slots
+are padded and excluded by the PPO loss mask. The actor's priority store waits
+for five segments whose model version equals the current version. It then
+computes GAE, normalizes advantages, performs two PPO epochs over the 180 fixed
+chunk slots, synchronizes the new weights to the rollout worker, and writes
+``checkpoints/global_step_<N>/``. Consequently, an operator label ends an
+episode but does not update the model immediately; the update starts only after
+the fifth complete rollout segment has reached the actor.
+
+The default placement collocates actor and rollout on GPU 0 of the inference
+node. If both OpenPI copies do not fit, assign ``actor`` and ``rollout`` to
+different GPU placements before running on the real robot. ``Ctrl+C`` during an
+unfinished collection does not turn the partial segment into a checkpoint; use
+the latest completed ``global_step_<N>`` to resume.
 
 Viewing Results
 ---------------

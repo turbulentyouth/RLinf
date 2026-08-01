@@ -26,6 +26,50 @@ from rlinf.envs.realworld.arx_x5_dual.recorder import ArxX5DualLeRobotRecorder
 from rlinf.envs.realworld.common.wrappers import KeyboardEvalControlWrapper
 
 
+def _episode_reward_kwargs(
+    control: Mapping[str, Any], env_cfg: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build optional sparse-reward arguments for ARX episode control."""
+
+    reward_cfg = control.get("reward", {})
+    if not reward_cfg or not bool(reward_cfg.get("enabled", False)):
+        return {
+            "success_keys": (),
+            "failure_keys": (),
+            "interrupt_keys": ("Key.left", "Key.right"),
+            "save_keys": ("Key.right",),
+            "discard_keys": ("Key.left",),
+        }
+
+    mode = str(reward_cfg.get("mode", "normalized_step_penalty"))
+    if mode != "normalized_step_penalty":
+        raise ValueError(
+            "ARX episode_control.reward.mode must be "
+            f"'normalized_step_penalty', got {mode!r}."
+        )
+
+    max_episode_steps = int(env_cfg.get("max_episode_steps", 0))
+    if max_episode_steps <= 0:
+        raise ValueError(
+            "ARX normalized step-penalty reward requires "
+            "max_episode_steps > 0 in the active environment config."
+        )
+
+    success_keys = tuple(reward_cfg.get("success_keys", ("Key.right",)))
+    failure_keys = tuple(reward_cfg.get("failure_keys", ("Key.left",)))
+    return {
+        "success_keys": success_keys,
+        "failure_keys": failure_keys,
+        "interrupt_keys": tuple(reward_cfg.get("interrupt_keys", ())),
+        "save_keys": success_keys,
+        "discard_keys": failure_keys,
+        "step_reward": -1.0 / max_episode_steps,
+        "success_reward": float(reward_cfg.get("success_reward", 0.0)),
+        "failure_reward": float(reward_cfg.get("failure_reward", -1.0)),
+        "timeout_reward": float(reward_cfg.get("timeout_reward", -1.0)),
+    }
+
+
 def create_arx_x5_dual_env(
     override_cfg: dict[str, Any],
     worker_info: Any,
@@ -77,19 +121,16 @@ def create_arx_x5_dual_env(
             resume=bool(recording.get("resume", False)),
         )
     if control and bool(control.get("enabled", False)):
+        reward_kwargs = _episode_reward_kwargs(control, env_cfg)
         env = KeyboardEvalControlWrapper(
             env,
             start_keys=(),
-            success_keys=(),
-            failure_keys=(),
-            interrupt_keys=("Key.left", "Key.right"),
             reset_wait_seconds=float(control.get("reset_wait_seconds", 0.0)),
             continue_key="Key.right",
             preserve_env_done=True,
             episode_recorder=recorder,
-            save_keys=("Key.right",),
-            discard_keys=("Key.left",),
             exit_keys=("Key.esc",),
+            **reward_kwargs,
         )
     if recorder is not None and not bool(control.get("enabled", False)):
         recorder.close()

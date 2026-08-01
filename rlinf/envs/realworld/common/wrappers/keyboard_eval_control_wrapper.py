@@ -13,9 +13,11 @@
 # limitations under the License.
 """Foot-pedal-gated wrapper for autonomous policy eval.
 
-Pedal: ``a`` starts a rollout from idle; ``c`` ends with reward=1
-("success"); ``b`` ends with reward=0 ("failure"). On end, returns
-``terminated=True`` and lets the outer ``auto_reset`` drive home.
+By default, ``a`` starts a rollout from idle, ``c`` ends with reward 1
+(success), and ``b`` ends with reward 0 (failure). Reward values and keys are
+configurable so real-world tasks can use normalized step penalties and terminal
+human labels. On end, the wrapper returns ``terminated=True`` and lets the
+outer ``auto_reset`` drive home.
 ``exit_keys`` (e.g. ESC) do not raise: they set :attr:`exit_requested`,
 truncate the current episode, and let the env worker/runner wind down
 gracefully (close_envs homes the arms before the driver exits).
@@ -54,10 +56,22 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         save_keys: tuple[str, ...] = (),
         discard_keys: tuple[str, ...] = (),
         exit_keys: tuple[str, ...] = (),
+        step_reward: float | None = None,
+        success_reward: float = 1.0,
+        failure_reward: float = 0.0,
+        timeout_reward: float | None = None,
     ):
         super().__init__(env)
         if reset_wait_seconds is not None and reset_wait_seconds < 0:
             raise ValueError("reset_wait_seconds must be non-negative or null.")
+        for name, value in (
+            ("step_reward", step_reward),
+            ("success_reward", success_reward),
+            ("failure_reward", failure_reward),
+            ("timeout_reward", timeout_reward),
+        ):
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite or null.")
         self.listener = KeyboardListener()
         self.start_keys = set(start_keys)
         self.success_keys = set(success_keys)
@@ -70,10 +84,16 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         self.save_keys = set(save_keys)
         self.discard_keys = set(discard_keys)
         self.exit_keys = set(exit_keys)
+        self.step_reward = step_reward
+        self.success_reward = float(success_reward)
+        self.failure_reward = float(failure_reward)
+        self.timeout_reward = timeout_reward
         self._running = False
         self._exit_requested = False
         self._last_obs: Any = None
         self._last_press_ts: dict[str, float] = {}
+        self._episode_steps = 0
+        self._terminal_result: str | None = None
 
     @property
     def exit_requested(self) -> bool:
@@ -87,6 +107,8 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
 
     def reset(self, *, seed=None, options=None):
         self._last_press_ts.clear()
+        self._episode_steps = 0
+        self._terminal_result = None
         self.listener.pop_pressed_keys()
         obs, info = self.env.reset(seed=seed, options=options)
         self._last_obs = obs
@@ -145,6 +167,10 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         pre_step_obs = self._last_obs
         obs, reward, terminated, truncated, info = self.env.step(action)
         self._last_obs = obs
+        self._episode_steps += 1
+
+        if self.step_reward is not None:
+            reward = float(self.step_reward)
 
         if self.episode_recorder is not None:
             recorded_action = info.get("executed_action", action)
@@ -183,21 +209,47 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
                 break
             if key in self.success_keys:
                 terminated = True
-                reward = 1.0
+                truncated = False
+                reward = self.success_reward
                 result = "success"
                 self._running = False
+                if self.episode_recorder is not None and key in self.save_keys:
+                    self.episode_recorder.save_episode()
                 emit_event("episode_result_key", "wrapper", key=key, result="success")
                 break
             if key in self.failure_keys:
                 terminated = True
-                reward = 0.0
+                truncated = False
+                reward = self.failure_reward
                 result = "failure"
                 self._running = False
+                if self.episode_recorder is not None and key in self.discard_keys:
+                    self.episode_recorder.discard_episode("failure key pressed")
                 emit_event("episode_result_key", "wrapper", key=key, result="failure")
                 break
 
+        if result is None and truncated and self.timeout_reward is not None:
+            reward = float(self.timeout_reward)
+            result = "timeout"
+            self._running = False
+            if self.episode_recorder is not None:
+                self.episode_recorder.discard_episode("episode timed out")
+            emit_event(
+                "episode_timeout",
+                "wrapper",
+                episode_steps=self._episode_steps,
+                reward=reward,
+            )
+
+        if result is not None:
+            self._terminal_result = result
+
         info["eval_phase"] = "rec" if self._running else "pre"
         info["eval_result"] = result
+        if result is not None or self.step_reward is not None:
+            info["success"] = result == "success"
+        info["terminal_reason"] = result or "running"
+        info["episode_step"] = self._episode_steps
         return obs, reward, terminated, truncated, info
 
     def close(self) -> None:
@@ -245,7 +297,14 @@ class KeyboardEvalControlWrapper(gym.Wrapper):
         return obs, info
 
     def _idle_response(self, event: str | None):
-        info = {"eval_phase": "pre", "eval_event": event, "eval_result": None}
+        info = {
+            "eval_phase": "pre",
+            "eval_event": event,
+            "eval_result": self._terminal_result,
+            "success": self._terminal_result == "success",
+            "terminal_reason": self._terminal_result or "idle",
+            "episode_step": self._episode_steps,
+        }
         return self._last_obs, 0.0, False, False, info
 
     def _log_info(self, message: str, *args) -> None:
