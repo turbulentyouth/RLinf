@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
+import packaging.version
 
+from rlinf.utils.eval_events import emit_event
 from rlinf.utils.logging import get_logger
 
 _STATE_NAMES = (
@@ -87,6 +89,95 @@ def _check_features_match(existing: Mapping[str, Any], requested: Mapping) -> No
     )
 
 
+def _check_integrity(root: Path) -> None:
+    """Run LeRobot's local integrity check on an existing dataset directory.
+
+    Missing ``meta/`` files, parquet files, or videos make the loading fail
+    before any appending happens; unreadable parquet content surfaces when
+    the dataset table is materialized. On Hub fallback, abort instead: this
+    runs on the robot node before recording, and silently downloading episodes
+    is never the right action there.
+    """
+
+    try:
+        from lerobot.common.datasets.lerobot_dataset import (
+            LeRobotDataset,
+            LeRobotDatasetMetadata,
+        )
+        from lerobot.common.datasets.utils import (
+            EPISODES_PATH,
+            EPISODES_STATS_PATH,
+            INFO_PATH,
+            STATS_PATH,
+            TASKS_PATH,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "ARX recording requires RLinf's pinned LeRobot installation. "
+            "Re-run requirements/install.sh for openpi + arx_x5_dual."
+        ) from exc
+
+    # 1. Meta files required by LeRobotDatasetMetadata.load_metadata().
+    # Check presence first: otherwise a missing meta file triggers a Hub
+    # download attempt inside load_metadata(), which must never happen on
+    # the robot node during resume.
+    info_path = root / INFO_PATH
+    if not info_path.is_file():
+        raise FileNotFoundError(
+            f"ARX LeRobot resume integrity check: dataset at {root} is missing "
+            f"{INFO_PATH}; it looks incomplete or corrupted. Move or delete it "
+            "before resuming, or point recording.repo_id/root elsewhere."
+        )
+    info = json.loads(info_path.read_text())
+    meta_paths = [TASKS_PATH, EPISODES_PATH]
+    meta_paths.append(
+        STATS_PATH
+        if packaging.version.parse(info["codebase_version"])
+        < packaging.version.parse("v2.1")
+        else EPISODES_STATS_PATH
+    )
+    missing_meta = [path for path in meta_paths if not (root / path).is_file()]
+    if missing_meta:
+        raise FileNotFoundError(
+            f"ARX LeRobot resume integrity check: dataset at {root} is missing "
+            f"meta files {missing_meta}; it looks incomplete or corrupted. Move "
+            "or delete it before resuming, or point recording.repo_id/root "
+            "elsewhere."
+        )
+
+    # All meta files are on disk, so loading stays fully local.
+    meta = LeRobotDatasetMetadata(repo_id="local/check", root=root)
+
+    # 2. Per-episode parquet and video files required by LeRobotDataset.
+    file_paths = [
+        meta.get_data_file_path(ep_idx) for ep_idx in range(meta.total_episodes)
+    ]
+    file_paths += [
+        meta.get_video_file_path(ep_idx, vid_key)
+        for vid_key in meta.video_keys
+        for ep_idx in range(meta.total_episodes)
+    ]
+    missing_files = [path for path in file_paths if not (root / path).is_file()]
+    if missing_files:
+        raise FileNotFoundError(
+            f"ARX LeRobot resume integrity check: dataset at {root} is missing "
+            f"{len(missing_files)} data/video files, e.g. {missing_files[:5]}; "
+            "it looks incomplete or corrupted. Move or delete it before "
+            "resuming, or point recording.repo_id/root elsewhere."
+        )
+
+    # 3. Load from local disk; this parses the parquet files and runs
+    # LeRobot's timestamp/fps consistency check. Guard against Hub downloads.
+    dataset = LeRobotDataset(repo_id="local/check", root=root, download_videos=False)
+    if dataset.revision != meta.revision:  # a Hub fallback happened
+        raise RuntimeError(
+            f"ARX LeRobot resume integrity check: dataset at {root} triggered "
+            "a Hub fallback, refusing to download on the robot node. Move or "
+            "delete the local dataset before resuming, or point "
+            "recording.repo_id/root elsewhere."
+        )
+
+
 class ArxX5DualLeRobotRecorder:
     """Buffer ARX inference frames and explicitly save or discard episodes."""
 
@@ -122,6 +213,7 @@ class ArxX5DualLeRobotRecorder:
         )
         features = _features(image_height, image_width, use_videos)
         if resume and (dataset_root / "meta" / "info.json").is_file():
+            _check_integrity(dataset_root)
             dataset = LeRobotDataset(
                 repo_id=repo_id,
                 root=dataset_root,
@@ -138,16 +230,21 @@ class ArxX5DualLeRobotRecorder:
                 dataset_root,
                 dataset.meta.total_episodes,
             )
+        elif resume and dataset_root.exists() and any(dataset_root.iterdir()):
+            # Non-empty directory without meta/info.json: run the integrity
+            # check so a merely unusual layout (e.g. renamed meta dir) can be
+            # diagnosed precisely; genuinely broken datasets raise here with
+            # the list of missing pieces.
+            _check_integrity(dataset_root)
+            raise RuntimeError(
+                "ARX LeRobot resume requested but the dataset at "
+                f"{dataset_root} is missing meta/info.json while its data "
+                "files pass the integrity check; it looks incomplete or "
+                "corrupted. Move or delete it before resuming, or point "
+                "recording.repo_id/root elsewhere."
+            )
         else:
             dir_exists = dataset_root.exists()
-            non_empty = dir_exists and any(dataset_root.iterdir())
-            if resume and non_empty:
-                raise RuntimeError(
-                    "ARX LeRobot resume requested but the dataset at "
-                    f"{dataset_root} is missing meta/info.json while its directory "
-                    "is non-empty; it looks incomplete or corrupted. Move or delete "
-                    "it before resuming, or point recording.repo_id/root elsewhere."
-                )
             if not resume and dir_exists:
                 raise FileExistsError(
                     f"ARX LeRobot dataset directory {dataset_root} already exists. "
@@ -191,6 +288,8 @@ class ArxX5DualLeRobotRecorder:
     ) -> None:
         """Add one pre-action observation and its executed absolute action."""
 
+        if self._frame_count == 0:
+            emit_event("recording_start", "recorder", task=self._task)
         state = observation["state"]["joint_position"]
         frames = observation["frames"]
         frame = {
@@ -212,8 +311,10 @@ class ArxX5DualLeRobotRecorder:
             self._logger.warning("ARX recording episode is empty; nothing was saved.")
             return
         frame_count = self._frame_count
+        emit_event("recording_save_start", "recorder", frames=frame_count)
         self._dataset.save_episode()
         self._frame_count = 0
+        emit_event("recording_saved", "recorder", frames=frame_count)
         self._logger.info("Saved ARX LeRobot episode with %d frames.", frame_count)
 
     def discard_episode(self, reason: str) -> None:
@@ -227,6 +328,9 @@ class ArxX5DualLeRobotRecorder:
             image_writer.wait_until_done()
         self._dataset.clear_episode_buffer()
         self._frame_count = 0
+        emit_event(
+            "recording_discarded", "recorder", frames=frame_count, reason=reason
+        )
         self._logger.info(
             "Discarded ARX LeRobot episode with %d frames (%s).",
             frame_count,

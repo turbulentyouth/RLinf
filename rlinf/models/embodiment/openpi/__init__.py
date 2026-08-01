@@ -90,6 +90,27 @@ def get_model(cfg: DictConfig, torch_dtype=None):
     model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     # fsdp replace
     # model.paligemma_with_expert.replace_gemma_decoder_layers()
+
+    # Newer transformers (e.g. >= 4.49) build Gemma's token embedding as
+    # GemmaTextScaledWordEmbedding, which already multiplies embeddings by
+    # sqrt(hidden). openpi's `embed_prefix` then applies its own sqrt(emb_dim)
+    # factor on top, silently scaling prompt/state tokens by hidden**1 instead
+    # of hidden**0.5 and destroying the policy's language conditioning. Cancel
+    # the duplicated scale when the embedding module self-scales.
+    embed_tokens = model.paligemma_with_expert.paligemma.language_model.embed_tokens
+    embed_scale = getattr(embed_tokens, "scalar_embed_scale", None)
+    if embed_scale is not None:
+        orig_embed_language_tokens = model.paligemma_with_expert.embed_language_tokens
+
+        def embed_language_tokens_without_extra_scale(
+            tokens, _orig=orig_embed_language_tokens, _scale=float(embed_scale)
+        ):
+            return _orig(tokens) / _scale
+
+        model.paligemma_with_expert.embed_language_tokens = (
+            embed_language_tokens_without_extra_scale
+        )
+
     # load data stats
     data_config = actor_train_config.data.create(
         actor_train_config.assets_dirs, actor_model_config

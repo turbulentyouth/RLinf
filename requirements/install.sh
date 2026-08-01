@@ -686,8 +686,8 @@ apply_torch_override() {
     # band for non-default Torch combos), or
     # PLATFORM_EXTRA_OVERRIDES has entries (insert extra override pins).
 
-    # The default torchcodec==0.2.x follows Torch 2.5/2.6. Relax the pin
-    # whenever the effective Torch version exceeds 2.6; target constraints can
+    # The default torchcodec==0.5.x follows Torch 2.7. Relax the pin
+    # whenever the effective Torch version exceeds 2.7; target constraints can
     # then select an exact compatible release (0.5 for Torch 2.7).
     local _eff_torch="${TORCH_VERSION}"
     if [ -z "$_eff_torch" ] && [ -f "$PYPROJECT_FILE" ]; then
@@ -2500,7 +2500,7 @@ install_opensora_world_model() {
     uv pip install -e "$opensora_dir"
 
     # xformers 0.0.29.post2 only has wheels for torch<=2.5, but we pin
-    # torch==2.6.0. UV_TORCH_BACKEND=auto rejects mismatched torch-version
+    # torch==2.7.1. UV_TORCH_BACKEND=auto rejects mismatched torch-version
     # labels, so unset UV_TORCH_BACKEND entirely for this install so uv
     # picks the non-CUDA wheel without torch-version filtering.
     env -u UV_TORCH_BACKEND uv pip install "xformers==0.0.29.post2"

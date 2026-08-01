@@ -34,17 +34,13 @@ run_modes:
     experiment_name: realworld-eval-arx-x5-dual-pi05-dryrun-hardware
     dry_run: true
     is_dummy: false
-    max_episode_steps: 500
-    max_num_steps: 500
-    max_steps_per_rollout_epoch: 500
+    max_episode_steps: 5000
     episode_control_enabled: true
   distributed_dry_run:
     experiment_name: realworld-eval-arx-x5-dual-pi05-dryrun-distributed
     dry_run: false
     is_dummy: true
-    max_episode_steps: 5
-    max_num_steps: 5
-    max_steps_per_rollout_epoch: 50
+    max_episode_steps: 50
     episode_control_enabled: false
 
 cluster:
@@ -79,13 +75,6 @@ runner:
     project_name: arx-x5-dual-openpi
     experiment_name: ${run_modes.${run_mode}.experiment_name}
     logger_backends: ["tensorboard"]
-  max_epochs: 1
-  max_steps: 1
-  only_eval: true
-  val_check_interval: -1
-  save_interval: -1
-  resume_dir: null
-  ckpt_path: null
   continuous_eval:
     enabled: true
     max_cycles: null
@@ -109,7 +98,6 @@ env:
     ignore_terminations: false
     is_eval: true
     max_episode_steps: ${run_modes.${run_mode}.max_episode_steps}
-    max_steps_per_rollout_epoch: ${run_modes.${run_mode}.max_steps_per_rollout_epoch}
     episode_control:
       enabled: ${run_modes.${run_mode}.episode_control_enabled}
       # 推理中：左方向键标记失败并丢弃，右方向键标记成功并保存；
@@ -133,10 +121,10 @@ env:
       # null uses the LeRobot default; an absolute path matches --record_root.
       root: null
       # null reuses override_cfg.task_description, matching --task.
-      task: null
+
       # true 在已存在的数据集上断点续录（校验 features 后继续追加 episode）；
       # 数据集不存在时自动创建新的。false 要求数据集目录不存在，从零创建。
-      resume: false
+      resume: true
       fps: 30
       use_videos: true
       image_writer_threads: 4
@@ -144,13 +132,15 @@ env:
     override_cfg:
       dry_run: ${run_modes.${run_mode}.dry_run}
       is_dummy: ${run_modes.${run_mode}.is_dummy}
+      # true 让外层 RealWorldEnv 透传键盘 Wrapper 上报的 truncated 信号；
+      # 为 false 时左/右键中断不会触发 auto_reset（机械臂停住、推理空转）。
+      manual_episode_control_only: true
       left_interface: ${oc.env:ARX_LEFT_INTERFACE,can1}
       right_interface: ${oc.env:ARX_RIGHT_INTERFACE,can3}
       head_camera_serial: ${oc.env:ARX_HEAD_CAMERA_SERIAL,230322271365} # 230322271365
       left_wrist_camera_serial: ${oc.env:ARX_LEFT_CAMERA_SERIAL,230422271416} # 230422271416
       right_wrist_camera_serial: ${oc.env:ARX_RIGHT_CAMERA_SERIAL,230322274234} # 230322274234
       task_description: "centre the blue cube, stack green cube on top of the blue cube, stack yellow cube on top of the green cube, stack red cube on top of the yellow cube."
-      max_num_steps: ${run_modes.${run_mode}.max_num_steps}
       step_frequency: 30.0
       start_position:
         left_joints: [0.0, 0.948, 0.858, -0.573, 0.0, 0.0]
@@ -178,7 +168,7 @@ rollout:
     precision: null
     num_action_chunks: 50
     action_dim: 14
-    num_steps: 5
+    num_steps: 10
     add_value_head: false
     openpi:
       config_name: "pi05_arx_x5_dual"
@@ -191,4 +181,4 @@ rollout:
       add_value_head: ${rollout.model.add_value_head}
     openpi_data:
       repo_id: Xense/stack_cubes_0722
-      norm_stats_path: /home/li/hubo/RLinf/79999_torch/assets/Xense/stack_cubes_0722
+      norm_stats_path: /home/li/hubo/xense-openpi/checkpoints/79999/assets/Xense/stack_cubes_0722

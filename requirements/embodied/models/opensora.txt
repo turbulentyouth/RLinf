@@ -1,7 +1,7 @@
 # xformers wheels embed the torch version in their local label (e.g.
 # +cu124torch2.5). UV_TORCH_BACKEND=auto rejects them when the resolved torch
 # version doesn't match — but 0.0.29.post2 only has <=torch2.5 wheels while
-# we pin torch==2.6.0. Install separately via --torch-backend cpu in
+# we pin torch==2.7.1. Install separately via --torch-backend cpu in
 # install_opensora_world_model so the torch-version filter is bypassed.
 # xformers==0.0.29.post2  <- installed separately; see install.sh
 annotated-doc==0.0.4
