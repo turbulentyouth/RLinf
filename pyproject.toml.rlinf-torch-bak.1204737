@@ -190,9 +190,9 @@ conflicts = [
     ],
 ]
 override-dependencies = [
-    "torch==2.7.1+cu128",
-    "torchvision==0.22.1+cu128",
-    "torchaudio==2.7.1+cu128",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "torchaudio==2.7.1",
     "torchcodec==0.5",
     "xgrammar==0.1.19",
     "uvloop==0.21.0",
@@ -249,13 +249,3 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = "dynamic"
-
-[[tool.uv.index]]
-name = "pytorch-platform"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-platform" }
-torchvision = { index = "pytorch-platform" }
-torchaudio = { index = "pytorch-platform" }
