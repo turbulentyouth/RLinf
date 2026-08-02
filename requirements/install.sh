@@ -9,6 +9,8 @@ ENV_NAME=""
 VENV_DIR=".venv"
 PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
+LEROBOT_XENSE_REPO_URL="${LEROBOT_XENSE_REPO_URL:-https://github.com/Vertax42/lerobot-xense}"
+LEROBOT_XENSE_COMMIT="${LEROBOT_XENSE_COMMIT:-88f7173df1ab3d02202d4962ee778249e1d66f10}"
 ARX5_SDK_COMMIT="a1188874d5a50aa61dec4f0b8fec6af77638b390"
 LIBPYFLEXIV_REPO_URL="${LIBPYFLEXIV_REPO_URL:-https://github.com/turbulentyouth/libpyflexiv}"
 LIBPYFLEXIV_COMMIT="${LIBPYFLEXIV_COMMIT:-baa532b5ffdc639fc66cbb4efae8919b328ca2e8}"
@@ -1717,6 +1719,68 @@ install_lerobot() {
         "git+${GITHUB_PREFIX}https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
 }
 
+install_lerobot_xense() {
+    # Install the Xense LeRobot fork (bi_flexiv only). This intentionally
+    # REPLACES the pinned upstream huggingface/lerobot in the active venv:
+    # lerobot-xense ships lerobot.robots.bi_flexiv_rizon4_rt, which upstream
+    # does not have. A venv that has run this function can no longer use the
+    # arx_x5_dual recorder (which imports lerobot.common.*); keep arx and
+    # bi_flexiv in separate --venv directories.
+    local xense_dir
+    xense_dir=$(clone_or_reuse_repo LEROBOT_XENSE_PATH \
+        "$VENV_DIR/lerobot-xense" \
+        "${GITHUB_PREFIX}${LEROBOT_XENSE_REPO_URL}")
+
+    if [ -n "$(git -C "$xense_dir" status --porcelain)" ]; then
+        echo "lerobot-xense checkout has local changes: $xense_dir" >&2
+        echo "Commit or stash them before installing." >&2
+        exit 1
+    fi
+    if ! git -C "$xense_dir" cat-file -e "$LEROBOT_XENSE_COMMIT^{commit}" 2>/dev/null; then
+        git -C "$xense_dir" fetch \
+            "${GITHUB_PREFIX}${LEROBOT_XENSE_REPO_URL}" "$LEROBOT_XENSE_COMMIT"
+    fi
+    git -C "$xense_dir" checkout --detach "$LEROBOT_XENSE_COMMIT"
+
+    # UV_CONSTRAINT (bi_flexiv_constraints.txt) is already exported by the
+    # caller, but the fork hard-pins opencv-python==4.12.0.88 (GUI) and
+    # opencv-python-headless==4.12.0.88, which contradicts our 4.11 pin at the
+    # wheel level. uv resolves the whole graph and refuses the fork outright;
+    # pip installs package-by-package and tolerates the conflict, so install
+    # with pip and then put the ABI boundary back by hand:
+    #   1. drop the GUI build that would corrupt cv2;
+    #   2. restore the pinned headless build shared with arx_x5_dual.
+    # The fork's OpenCV usage (OpenCVCamera, resize) is API-compatible across
+    # 4.11/4.12, so downgrading the wheel is safe. The fork also lifts
+    # datasets to >=4.0.0 (RLinf pins 3.6.0 globally); the bi_flexiv venv has
+    # no other datasets consumer, so the upgrade is accepted.
+    python -m pip install --no-deps -e "$xense_dir"
+    python -m pip install -e "$xense_dir"
+    python -m pip uninstall -y opencv-python opencv-python-headless
+    env -u UV_TORCH_BACKEND uv pip install opencv-python-headless==4.11.0.86
+
+    python - <<'PY'
+from importlib import metadata
+
+import cv2
+import datasets
+import numpy as np
+
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.utils.constants import HF_LEROBOT_HOME
+
+assert metadata.version("lerobot") == "0.5.1", metadata.version("lerobot")
+assert np.__version__ == "1.26.4", np.__version__
+assert cv2.__version__.startswith("4.11"), cv2.__version__
+assert datasets.__version__.startswith("4."), datasets.__version__
+# NOTE: do not import lerobot.robots.bi_flexiv_rizon4_rt here — that module
+# does `import flexiv_rt` at top level, and flexiv_rt is only compiled later
+# in install_bi_flexiv_env (step 6 verifies the full surface).
+assert LeRobotDataset is not None
+print("lerobot-xense (bi_flexiv) import and ABI boundary OK")
+PY
+}
+
 install_xense_openpi() {
     # Install the pinned inference-only fork. RLinf owns LeRobot, OpenCV, and
     # the NumPy ABI; the fork deliberately leaves those integrations optional.
@@ -2382,7 +2446,9 @@ PY
 }
 
 install_bi_flexiv_env() {
-    install_lerobot
+    # bi_flexiv uses the Xense LeRobot fork instead of the pinned upstream
+    # lerobot: only the fork ships lerobot.robots.bi_flexiv_rizon4_rt.
+    install_lerobot_xense
 
     if is_aarch64_platform; then
         # The RDK ships a prebuilt x86_64 static library downloaded during its
@@ -2416,21 +2482,117 @@ install_bi_flexiv_env() {
     # next to the uv venv so it stays isolated per environment.
     local rdk_prefix
     rdk_prefix="$(realpath "$VENV_DIR")/flexiv-rdk"
+    # The upstream thirdparty scripts pin tinyxml2 8.0.0, whose CMakeLists.txt
+    # uses cmake_minimum_required(VERSION 2.6) and sets CMP0063 OLD — both
+    # rejected by CMake >= 4 (even with -DCMAKE_POLICY_VERSION_MINIMUM=3.5).
+    # The venv ships cmake 4.x at $VENV_DIR/bin/cmake, which shadows the
+    # system cmake 3.x on PATH, and the thirdparty scripts call bare `cmake`
+    # (they do not read CMAKE_COMMAND/CMAKE_ARGS). So the only reliable fix
+    # is to run the whole C++ build against a CMake 3.x resolved by absolute
+    # path, plus a PATH with every venv bin stripped for the bare `cmake`
+    # calls inside the thirdparty scripts. Prefer /usr/bin/cmake, then fall
+    # back to scanning PATH for any 3.x.
+    local rdk_build_path rdk_cmake venv_bin
+    venv_bin="$(realpath "$VENV_DIR")/bin"
+    rdk_build_path=$(echo "$PATH" | tr ':' '\n' | grep -vx "$venv_bin" | grep -vx "$VENV_DIR/bin" | paste -sd:)
+    rdk_cmake=""
+    local cand
+    for cand in /usr/bin/cmake /usr/local/bin/cmake /bin/cmake; do
+        if [ -x "$cand" ] && "$cand" --version 2>/dev/null | grep -q "^cmake version 3\."; then
+            rdk_cmake="$cand"
+            break
+        fi
+    done
+    if [ -z "$rdk_cmake" ]; then
+        # Last resort: whatever `cmake` the stripped PATH resolves to.
+        cand=$(PATH="$rdk_build_path" command -v cmake 2>/dev/null || true)
+        if [ -n "$cand" ] && "$cand" --version 2>/dev/null | grep -q "^cmake version 3\."; then
+            rdk_cmake="$cand"
+        fi
+    fi
+    if [ -z "$rdk_cmake" ]; then
+        echo "flexiv_rdk needs a CMake 3.x, but none was found." >&2
+        echo "  /usr/bin/cmake -> $(/usr/bin/cmake --version 2>/dev/null | head -1 || echo missing)" >&2
+        echo "  venv cmake     -> $("$VENV_DIR/bin/cmake" --version 2>/dev/null | head -1 || echo missing)" >&2
+        echo "Install CMake 3.x (e.g. sudo apt install cmake) and re-run." >&2
+        exit 1
+    fi
+    echo "flexiv_rdk C++ build will use CMake: $rdk_cmake ($("$rdk_cmake" --version | head -1))"
     if [ ! -f "$rdk_prefix/lib/cmake/flexiv_rdk/flexiv_rdk-config.cmake" ]; then
-        echo "Building flexiv_rdk C++ dependencies (Eigen, spdlog, Fast-DDS, ...)..."
+        # The upstream foonathan_memory_vendor package only installs its own
+        # config files; its ExternalProject for the actual foonathan_memory
+        # library never builds/installs into the prefix. Fast-DDS then picks up
+        # a config pointing at a non-existent /usr/include/foonathan_memory and
+        # fails with "Imported target includes non-existent path". Build and
+        # install the real foonathan_memory (v0.7-3, the version the vendor
+        # package pins) into the prefix FIRST, so downstream find_package hits
+        # the real target and the vendor package takes its already-found branch.
+        if [ ! -f "$rdk_prefix/lib/cmake/foonathan_memory/foonathan_memory-config.cmake" ]; then
+            local foonathan_src="$sdk_dir/flexiv_rdk/thirdparty/cloned/foonathan_memory"
+            echo "Building foonathan_memory v0.7-3 into $rdk_prefix ..."
+            if [ ! -d "$foonathan_src/.git" ]; then
+                rm -rf "$foonathan_src"
+                git clone https://github.com/foonathan/memory.git --branch v0.7-3 "$foonathan_src" \
+                    || { echo "foonathan_memory clone failed" >&2; exit 1; }
+            fi
+            "$rdk_cmake" -S "$foonathan_src" -B "$foonathan_src/build" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                -DFOONATHAN_MEMORY_BUILD_EXAMPLES=OFF \
+                -DFOONATHAN_MEMORY_BUILD_TESTS=OFF \
+                -DFOONATHAN_MEMORY_BUILD_TOOLS=OFF \
+                -DCMAKE_INSTALL_PREFIX="$rdk_prefix" \
+                || { echo "foonathan_memory CMake configuration failed" >&2; exit 1; }
+            "$rdk_cmake" --build "$foonathan_src/build" --target install -j"$(nproc)" \
+                || { echo "foonathan_memory build failed" >&2; exit 1; }
+        fi
+        echo "Building flexiv_rdk C++ dependencies (Eigen, spdlog, Fast-DDS, ...) with $rdk_cmake..."
         (cd "$sdk_dir/flexiv_rdk/thirdparty" \
-            && bash build_and_install_dependencies.sh "$rdk_prefix" "$(nproc)") \
+            && env PATH="$rdk_build_path" \
+                bash build_and_install_dependencies.sh "$rdk_prefix" "$(nproc)") \
             || { echo "flexiv_rdk dependencies build failed" >&2; exit 1; }
+
+        # The thirdparty script can report success while Fast-DDS was skipped
+        # (e.g. OpenSSL dev files missing on this host, so its configure was
+        # left incomplete). Flexiv's DDS transport does not need TLS, so if
+        # Fast-DDS is absent, (re)install it explicitly with TLS disabled.
+        if [ ! -f "$rdk_prefix/lib/cmake/fastrtps/fastrtps-config.cmake" ] && \
+           [ ! -f "$rdk_prefix/lib/cmake/fastdds/fastdds-config.cmake" ]; then
+            local fastdds_src="$sdk_dir/flexiv_rdk/thirdparty/cloned/Fast-DDS"
+            echo "Fast-DDS missing after thirdparty step; reinstalling with TLS disabled ..."
+            if [ ! -d "$fastdds_src/.git" ]; then
+                rm -rf "$fastdds_src"
+                git clone https://github.com/eProsima/Fast-DDS.git --branch v2.6.10 "$fastdds_src" \
+                    || { echo "Fast-DDS clone failed" >&2; exit 1; }
+            fi
+            (cd "$fastdds_src" && git submodule update --init --recursive) \
+                || { echo "Fast-DDS submodule update failed" >&2; exit 1; }
+            "$rdk_cmake" -S "$fastdds_src" -B "$fastdds_src/build" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                -DCMAKE_PREFIX_PATH="$rdk_prefix" \
+                -DCMAKE_INSTALL_PREFIX="$rdk_prefix" \
+                -DBUILD_TESTING=OFF \
+                -DTHIRDPARTY_Asio=ON \
+                -DCOMPILE_EXAMPLES=OFF \
+                -DSQLITE3_SUPPORT=OFF \
+                -DNO_TLS=ON \
+                || { echo "Fast-DDS CMake configuration failed" >&2; exit 1; }
+            "$rdk_cmake" --build "$fastdds_src/build" --target install -j"$(nproc)" \
+                || { echo "Fast-DDS build failed" >&2; exit 1; }
+        fi
 
         echo "Building flexiv_rdk..."
         # The RDK configure step downloads the prebuilt x86_64 static library
         # (libflexiv_rdk.x86_64-linux-gnu.a) from GitHub; no sudo needed.
-        cmake -S "$sdk_dir/flexiv_rdk" -B "$sdk_dir/flexiv_rdk/build" \
+        "$rdk_cmake" -S "$sdk_dir/flexiv_rdk" -B "$sdk_dir/flexiv_rdk/build" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$rdk_prefix" \
             -DCMAKE_PREFIX_PATH="$rdk_prefix" \
             || { echo "flexiv_rdk CMake configuration failed" >&2; exit 1; }
-        cmake --build "$sdk_dir/flexiv_rdk/build" --target install -j"$(nproc)" \
+        "$rdk_cmake" --build "$sdk_dir/flexiv_rdk/build" --target install -j"$(nproc)" \
             || { echo "flexiv_rdk build failed" >&2; exit 1; }
     else
         echo "Reusing existing flexiv_rdk install at $rdk_prefix"
@@ -2440,16 +2602,27 @@ install_bi_flexiv_env() {
     # IMPORTANT: pass only the RDK prefix via CMAKE_PREFIX_PATH. Adding the
     # venv prefix picks up the PyPI `spdlog` package headers (fmt ABI v10)
     # while linking the RDK's spdlog (fmt ABI v8) -> undefined symbol errors.
+    # Reuse the CMake 3.x resolved above ($rdk_cmake); the RDK/pkg-config glue
+    # predates CMake 4.
+    #
+    # Python3_EXECUTABLE must be the venv LAUNCHER, NOT its realpath. realpath
+    # resolves to the uv-managed base interpreter, which does not have the
+    # venv's site-packages on sys.path, so the CMake probe
+    # `python -c "import pybind11"` fails even though pybind11 is installed in
+    # the venv. But VENV_DIR itself may be relative (".venv"), and CMake
+    # configures with a working directory under .venv/libpyflexiv, so a relative
+    # launcher path would resolve to the wrong place. Absolutize WITHOUT
+    # resolving the symlink: cd into the dir and use $PWD.
     local runtime_python build_dir
-    runtime_python="$(realpath "$VENV_DIR/bin/python")"
+    runtime_python="$(cd "$VENV_DIR" && pwd -P)/bin/python"
     build_dir="$sdk_dir/build"
     uv pip install pybind11
-    cmake -S "$sdk_dir" -B "$build_dir" \
+    "$rdk_cmake" -S "$sdk_dir" -B "$build_dir" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH="$rdk_prefix" \
         -DPython3_EXECUTABLE:FILEPATH="$runtime_python" \
         || { echo "libpyflexiv CMake configuration failed" >&2; exit 1; }
-    cmake --build "$build_dir" -j"$(nproc)" \
+    "$rdk_cmake" --build "$build_dir" -j"$(nproc)" \
         || { echo "libpyflexiv Python binding build failed" >&2; exit 1; }
 
     # ---- 4. Install the flexiv_rt package into the uv venv ----

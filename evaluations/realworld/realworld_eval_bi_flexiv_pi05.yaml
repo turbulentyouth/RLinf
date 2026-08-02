@@ -1,0 +1,170 @@
+# Flexiv Rizon4 双臂 + OpenPI pi0.5 两机统一评估配置。
+#
+# 使用 run_mode 在正式运行和两种 dry-run 之间切换：
+#   real: 连接机械臂和相机，并下发模型动作。
+#   hardware_dry_run: 读取真实硬件，但不下发模型动作。
+#   distributed_dry_run: 不连接硬件，使用零图像和内存关节状态测试双机链路。
+
+defaults:
+  - env/realworld_bi_flexiv_tcp@env.eval
+  - model/pi0_5@rollout.model
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+# 命令行覆盖：run_mode=real|hardware_dry_run|distributed_dry_run。
+run_mode: real
+run_modes:
+  real:
+    experiment_name: realworld-eval-bi-flexiv-pi05
+    dry_run: false
+    is_dummy: false
+    max_episode_steps: 50000
+    episode_control_enabled: true
+  hardware_dry_run:
+    experiment_name: realworld-eval-bi-flexiv-pi05-dryrun-hardware
+    dry_run: true
+    is_dummy: false
+    max_episode_steps: 5000
+    episode_control_enabled: true
+  distributed_dry_run:
+    experiment_name: realworld-eval-bi-flexiv-pi05-dryrun-distributed
+    dry_run: false
+    is_dummy: true
+    max_episode_steps: 50
+    episode_control_enabled: false
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    rollout:
+      node_group: inference
+      placement: 0
+    env:
+      node_group: robot
+      placement: 0
+  node_groups:
+    - label: inference
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      env_configs:
+        - node_ranks: 1
+          # Flexiv RT 1 kHz 控制创建 SCHED_FIFO 线程，robot 节点需要 root
+          # 或足够的 rtprio rlimit。以 root 运行 ray 时，把此处的解释器
+          # 路径指向 bi_flexiv venv 即可（ray worker 继承 raylet 的权限）。
+          python_interpreter_path: /home/xi/Downloads/RLinf/.venv/bin/python3
+          env_vars:
+            # Pin the keyboard device for KeyboardEvalControlWrapper on the robot
+            # node (multiple keyboard-capable devices may be present). Use the
+            # stable by-id path so it survives reboots / event renumbering.
+            - RLINF_KEYBOARD_DEVICE: /dev/input/by-id/usb-ITE_Tech._Inc._ITE_Device_8258_-event-kbd
+            # flexiv_rdk 的运行库目录由 install.sh 写入 venv activate；root
+            # 起 ray 时 activate 可能未生效，这里显式补上。
+            - LD_LIBRARY_PATH: /home/xi/Downloads/RLinf/.venv/flexiv-rdk/lib
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: "../results"
+    project_name: bi-flexiv-openpi
+    experiment_name: ${run_modes.${run_mode}.experiment_name}
+    logger_backends: ["tensorboard"]
+  continuous_eval:
+    enabled: true
+    max_cycles: null
+
+checkpoint_conversion:
+  enabled: true
+  checkpoint_path: REPLACE_WITH_YOUR_JAX_CHECKPOINT_DIR
+  converted_checkpoint_dir: ${oc.env:FLEXIV_PI05_TORCH_CHECKPOINT,null}
+  resolved_checkpoint_dir: null
+  config_name: ${rollout.model.openpi.config_name}
+  precision: "bfloat16"
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: false
+  eval:
+    rollout_epoch: 1
+    total_num_envs: 1
+    group_size: 1
+    auto_reset: true
+    ignore_terminations: false
+    is_eval: true
+    max_episode_steps: ${run_modes.${run_mode}.max_episode_steps}
+    episode_control:
+      enabled: ${run_modes.${run_mode}.episode_control_enabled}
+      # 推理中：左方向键丢弃并 reset，右方向键保存并 reset；
+      # ESC 丢弃当前 episode 并优雅退出（机械臂回零后服务器端退出）。
+      # 回到起始位后等待的时间；等待期间按右方向键立即开始下一轮。
+      reset_wait_seconds: 2000.0
+    recording:
+      # Equivalent to xense-openpi bi_flexiv_rizon4_rt --record.
+      enabled: true
+      # Equivalent to --record_repo_id; defaults to the LeRobot cache.
+      repo_id: "xijingfeng/bi_flexiv_eval_dataset"
+      # null uses the LeRobot default; an absolute path matches --record_root.
+      root: null
+      # null reuses override_cfg.task_description, matching --task.
+
+      # true 在已存在的数据集上断点续录（校验 features 后继续追加 episode）；
+      # 数据集不存在时自动创建新的。false 要求数据集目录不存在，从零创建。
+      resume: true
+      fps: 30
+      use_videos: true
+      image_writer_threads: 4
+      image_writer_processes: 0
+    override_cfg:
+      dry_run: ${run_modes.${run_mode}.dry_run}
+      is_dummy: ${run_modes.${run_mode}.is_dummy}
+      # true 让外层 RealWorldEnv 透传键盘 Wrapper 上报的 truncated 信号；
+      # 为 false 时左/右键中断不会触发 auto_reset（机械臂停住、推理空转）。
+      manual_episode_control_only: true
+      bi_mount_type: ${oc.env:FLEXIV_BI_MOUNT_TYPE,diagonal-02}
+      stiffness_ratio: ${oc.env:FLEXIV_STIFFNESS_RATIO,0.2}
+      enable_tactile_sensors: ${oc.env:FLEXIV_ENABLE_TACTILE,false}
+      # diagonal-02 预设：头部是 RealSense，左右腕是 Xense UVC USB 相机
+      # （用 /dev/v4l/by-id 名或 videoN，可用环境变量覆盖）。
+      head_camera_type: ${oc.env:FLEXIV_HEAD_CAMERA_TYPE,realsense}
+      left_wrist_camera_type: ${oc.env:FLEXIV_LEFT_CAMERA_TYPE,opencv}
+      right_wrist_camera_type: ${oc.env:FLEXIV_RIGHT_CAMERA_TYPE,opencv}
+      head_camera_serial: ${oc.env:FLEXIV_HEAD_CAMERA_SERIAL,REPLACE_WITH_HEAD_CAMERA_SERIAL}
+      left_wrist_camera_serial: ${oc.env:FLEXIV_LEFT_CAMERA_SERIAL,REPLACE_WITH_LEFT_WRIST_CAMERA_SERIAL}
+      right_wrist_camera_serial: ${oc.env:FLEXIV_RIGHT_CAMERA_SERIAL,REPLACE_WITH_RIGHT_WRIST_CAMERA_SERIAL}
+      task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
+      step_frequency: 30.0
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: false
+  enable_offload: false
+  pipeline_stage_num: 1
+  collect_transitions: false
+  collect_prev_infos: false
+  model:
+    model_path: ${checkpoint_conversion.checkpoint_path}
+    precision: null
+    num_action_chunks: 50
+    action_dim: 20
+    num_steps: 10
+    add_value_head: false
+    openpi:
+      config_name: "pi05_bi_flexiv"
+      num_images_in_input: 3
+      train_expert_only: false
+      detach_critic_input: true
+      action_chunk: ${rollout.model.num_action_chunks}
+      action_env_dim: ${rollout.model.action_dim}
+      num_steps: ${rollout.model.num_steps}
+      add_value_head: ${rollout.model.add_value_head}
+    openpi_data:
+      repo_id: Xense/pack_6_cosmetic_bottles_into_carton
+      norm_stats_path: REPLACE_WITH_YOUR_NORM_STATS_DIR

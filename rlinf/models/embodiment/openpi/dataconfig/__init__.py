@@ -34,6 +34,9 @@ from rlinf.models.embodiment.openpi.dataconfig.arx_x5_dual_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.behavior_dataconfig import (
     LeRobotBehaviorDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.bi_flexiv_dataconfig import (
+    BiFlexivDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.calvin_dataconfig import (
     LeRobotCalvinDataConfig,
 )
@@ -510,6 +513,35 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             assets=AssetsConfig(
                 assets_dir="checkpoints/torch/pi05_arx_x5_dual/assets"
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        seed=0,
+        batch_size=16,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_workers=8,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=250,
+    ),
+    TrainConfig(
+        # 该名字是 YAML 中 actor.model.openpi.config_name 的取值。
+        name="pi05_bi_flexiv",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            # 与 xense bi_flexiv SFT 配置一致：50 步训练动作块。
+            action_horizon=50,
+            discrete_state_input=True,
+        ),
+        data=BiFlexivDataConfig(
+            repo_id="bi_flexiv",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_bi_flexiv/assets"
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(

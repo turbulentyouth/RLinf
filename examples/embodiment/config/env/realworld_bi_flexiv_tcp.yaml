@@ -1,0 +1,90 @@
+# Flexiv Rizon4 双臂（RT）真机环境：三路 RGB 图像 + 20 维 TCP 位姿。
+#
+# 数据流：
+#   头部相机、左右腕相机、当前双臂状态
+#       -> RealWorldEnv observation
+#       -> OpenPI pi05_bi_flexiv 输入转换
+#       -> π0.5 输出 20 维 TCP 动作（前 18 维经 AbsoluteActions 还原为绝对位姿）
+#       -> BiFlexivDualEnv.step(action)
+#       -> BiFlexivRizon4RT.send_action (lerobot-xense / flexiv_rt)
+
+env_type: realworld
+
+# 真机只能有一个环境实例；同时创建两个实例会争用同一组机械臂和相机设备。
+total_num_envs: 1
+group_size: 1
+auto_reset: false
+ignore_terminations: false
+reward_mode: raw
+wrap_obs_mode: simple
+seed: 0
+use_fixed_reset_state_ids: false
+max_steps_per_rollout_epoch: 50000
+max_episode_steps: 50000
+
+# 头部相机是 π0.5 的主视角。RealWorldEnv 会把它映射为 main_images；
+# 其余两路按名称排序后堆叠为 extra_view_images，顺序是左腕、右腕。
+main_image_key: head
+
+# 当前版本不叠加遥操作和自动奖励 Wrapper，只验证 π0.5 与 Flexiv 的闭环。
+use_spacemouse: false
+use_gello: false
+use_gello_joint: false
+use_pico: false
+use_relative_frame: false
+no_gripper: false
+
+video_cfg:
+  save_video: false
+  info_on_video: true
+  video_base_dir: ${runner.logger.log_path}/video/eval
+
+init_params:
+  id: "BiFlexivDualEnv-v1"
+  num_envs: null
+
+override_cfg:
+  # 双臂安装方式：lerobot-xense 台架预设名（forward-04/05/06、forward-dewu、
+  # diagonal-02）。当前台架为 diagonal-02，与 xense-openpi bi_flexiv_rizon4_rt 一致。
+  bi_mount_type: "diagonal-02"
+  use_force: false
+  # connect 时先回起始位；RT 控制环由 connect 内部拉起。
+  go_to_start: true
+  # 笛卡尔阻抗刚度比例。参考项目默认 0.2；首次上电可降到 0.1 验证。
+  stiffness_ratio: 0.2
+  inner_control_hz: 1000
+  interpolate_cmds: true
+  # 触觉相机图像不会进入策略观测，仅当手爪装有 Xense 触觉传感器时打开。
+  enable_tactile_sensors: false
+  robot_log_level: "INFO"
+
+  # 替换为机器人电脑实际连接的三路相机标识。diagonal-02 预设的头部是
+  # RealSense（序列号），左右腕是 Xense UVC USB 相机（/dev/v4l/by-id 名或
+  # videoN），所以三路相机类型分开配置。
+  head_camera_serial: "REPLACE_WITH_HEAD_CAMERA_SERIAL"
+  left_wrist_camera_serial: "REPLACE_WITH_LEFT_WRIST_CAMERA_SERIAL"
+  right_wrist_camera_serial: "REPLACE_WITH_RIGHT_WRIST_CAMERA_SERIAL"
+  camera_type: "realsense"
+  head_camera_type: "realsense"
+  left_wrist_camera_type: "opencv"
+  right_wrist_camera_type: "opencv"
+  # 与 xense-openpi bi_flexiv 推理一致：原始 640x480 图像等比例缩放后补黑边。
+  image_height: 224
+  image_width: 224
+  camera_frame_timeout: 0.2
+
+  # reset 轨迹最长执行时间；参考项目使用 15 秒。
+  reset_timeout: 15.0
+  # π0.5 每秒更新 30 次 TCP 目标；RT 内环以 1 kHz 消费并插值。
+  step_frequency: 30.0
+
+  # 动作语义：前 18 维 TCP 位姿（xyz + 6D 旋转）由 AbsoluteActions 还原为
+  # 绝对值，后 2 维夹爪是 [0, 1] 归一化绝对值。Env 只透传，不做增量累加。
+
+  max_num_steps: 300
+  task_description: "REPLACE_WITH_YOUR_TASK_DESCRIPTION"
+  # hardware dry-run 与参考 wrapper 一致：仍执行 connect/reset/disconnect，
+  # 仅拦截模型动作。
+  dry_run: false
+  # distributed dry-run 使用 is_dummy=true，不要求连接机械臂或相机。
+  is_dummy: false

@@ -14,6 +14,8 @@
 
 from .arx_x5_dual import ArxX5ArmState, ArxX5DualEnv, ArxX5DualRobotConfig
 from .arx_x5_dual import tasks as arx_x5_dual_tasks
+from .bi_flexiv import BiFlexivArmState, BiFlexivDualEnv, BiFlexivDualRobotConfig
+from .bi_flexiv import tasks as bi_flexiv_tasks
 from .dosw1 import DOSW1Config, DOSW1Env
 from .dosw1 import tasks as dosw1_tasks
 from .franka import FrankaEnv, FrankaRobotConfig, FrankaRobotState
@@ -40,6 +42,10 @@ __all__ = [
     "ArxX5DualEnv",
     "ArxX5DualRobotConfig",
     "arx_x5_dual_tasks",
+    "BiFlexivArmState",
+    "BiFlexivDualEnv",
+    "BiFlexivDualRobotConfig",
+    "bi_flexiv_tasks",
     "DualFrankaEnv",
     "DualFrankaJointEnv",
     "DualFrankaJointRobotConfig",
