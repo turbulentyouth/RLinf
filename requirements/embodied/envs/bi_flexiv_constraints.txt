@@ -1,0 +1,12 @@
+# Runtime ABI and core dependency pins shared by RLinf, LeRobot, flexiv_rt,
+# and xense-openpi. requirements/install.sh exports this file through
+# UV_CONSTRAINT before any model/SDK-specific uv pip install commands.
+# Identical to arx_x5_dual_constraints.txt: both real-robot inference envs
+# share the same NumPy/OpenCV/torch ABI baseline.
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+sympy==1.13.1
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+torchaudio==2.7.1+cu128
+torchcodec==0.5

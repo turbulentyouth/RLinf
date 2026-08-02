@@ -10,6 +10,8 @@ VENV_DIR=".venv"
 PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
 ARX5_SDK_COMMIT="a1188874d5a50aa61dec4f0b8fec6af77638b390"
+LIBPYFLEXIV_REPO_URL="${LIBPYFLEXIV_REPO_URL:-https://github.com/turbulentyouth/libpyflexiv}"
+LIBPYFLEXIV_COMMIT="${LIBPYFLEXIV_COMMIT:-baa532b5ffdc639fc66cbb4efae8919b328ca2e8}"
 XENSE_OPENPI_REPO_URL="${XENSE_OPENPI_REPO_URL:-https://github.com/turbulentyouth/xense-openpi}"
 XENSE_OPENPI_COMMIT="${XENSE_OPENPI_COMMIT:-37d49f0b2f3d78e64cbcc7531853dcd6f7f1fcee}"
 XENSE_OPENPI_PYTHON_VERSION="${XENSE_OPENPI_PYTHON_VERSION:-3.12.12}"
@@ -88,7 +90,7 @@ NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris" "arx_x5_dual")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris" "arx_x5_dual" "bi_flexiv")
 
 #=======================Utility Functions=======================
 
@@ -1375,6 +1377,23 @@ install_openpi_model() {
             install_arx_x5_dual_env
             install_flash_attn
             ;;
+        bi_flexiv)
+            PYTHON_VERSION="$XENSE_OPENPI_PYTHON_VERSION"
+            create_and_sync_venv
+            install_common_embodied_runtime_deps
+            # See the arx_x5_dual branch: real-robot inference must not pull in
+            # the GUI OpenCV distribution or simulator stacks.
+            uv pip uninstall robosuite sapien bddl || true
+            uv pip uninstall opencv-python || true
+            # Reuse the arx_x5_dual extra: identical headless OpenCV / NumPy
+            # ABI requirements as the other real-robot inference envs.
+            uv sync --extra arx_x5_dual --inexact --active $NO_INSTALL_RLINF_CMD
+            export UV_CONSTRAINT="$SCRIPT_DIR/embodied/envs/bi_flexiv_constraints.txt"
+            uv pip install -r "$UV_CONSTRAINT"
+            install_xense_openpi
+            install_bi_flexiv_env
+            install_flash_attn
+            ;;
         polaris)
             create_and_sync_venv
             install_common_embodied_deps
@@ -1799,7 +1818,9 @@ install_franka_realworld_env() {
 install_env_only() {
     if [ "$ENV_NAME" = "d4rl" ]; then
         PYTHON_VERSION="3.10"
-    elif [ "$ENV_NAME" = "arx_x5_dual" ]; then
+    elif [ "$ENV_NAME" = "arx_x5_dual" ] || [ "$ENV_NAME" = "bi_flexiv" ]; then
+        # Pin 3.12 so a later `--model openpi` install reuses the same venv
+        # instead of recreating it for the xense-openpi Python requirement.
         PYTHON_VERSION="$XENSE_OPENPI_PYTHON_VERSION"
     fi
     create_and_sync_venv
@@ -1853,6 +1874,14 @@ install_env_only() {
         arx_x5_dual)
             uv sync --extra arx_x5_dual --active $NO_INSTALL_RLINF_CMD
             install_arx_x5_dual_env
+            ;;
+        bi_flexiv)
+            # Reuse the arx_x5_dual extra: it pins the same headless OpenCV /
+            # NumPy ABI stack every real-robot inference env shares.
+            uv sync --extra arx_x5_dual --inexact --active $NO_INSTALL_RLINF_CMD
+            export UV_CONSTRAINT="$SCRIPT_DIR/embodied/envs/bi_flexiv_constraints.txt"
+            uv pip install -r "$UV_CONSTRAINT"
+            install_bi_flexiv_env
             ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for env-only installation." >&2
@@ -2350,6 +2379,106 @@ PY
     echo "  source \"$VENV_DIR/bin/activate\""
     echo "  python toolkits/realworld_check/test_arx_x5_dual.py \\"
     echo "    --headless --left-interface can1 --right-interface can3"
+}
+
+install_bi_flexiv_env() {
+    install_lerobot
+
+    if is_aarch64_platform; then
+        # The RDK ships a prebuilt x86_64 static library downloaded during its
+        # cmake configure step, so there is nothing to build on aarch64.
+        echo "libpyflexiv/flexiv_rdk ships an x86_64-only prebuilt library; bi_flexiv is unsupported on $(uname -m)." >&2
+        exit 1
+    fi
+
+    # ---- 1. Clone libpyflexiv (with the pinned flexiv_rdk submodule) ----
+    local sdk_dir
+    sdk_dir=$(clone_or_reuse_repo LIBPYFLEXIV_PATH \
+        "$VENV_DIR/libpyflexiv" \
+        "${GITHUB_PREFIX}${LIBPYFLEXIV_REPO_URL}" \
+        --recurse-submodules)
+    if ! git -C "$sdk_dir" cat-file -e "$LIBPYFLEXIV_COMMIT^{commit}" 2>/dev/null; then
+        git -C "$sdk_dir" fetch origin "$LIBPYFLEXIV_COMMIT"
+    fi
+    if ! git -C "$sdk_dir" diff --quiet || \
+       ! git -C "$sdk_dir" diff --cached --quiet; then
+        echo "libpyflexiv checkout has local changes: $sdk_dir" >&2
+        echo "Commit or stash them before installing." >&2
+        exit 1
+    fi
+    git -C "$sdk_dir" checkout --detach "$LIBPYFLEXIV_COMMIT"
+    git -C "$sdk_dir" submodule update --init --recursive
+
+    # ---- 2. Build the Flexiv RDK C++ stack from source ----
+    # flexiv_rdk needs its C++ deps (Eigen, spdlog, tinyxml2, foonathan_memory,
+    # Fast-CDR, Fast-DDS) built from source by the upstream script; the RDK
+    # itself then builds against them. Everything installs into a prefix kept
+    # next to the uv venv so it stays isolated per environment.
+    local rdk_prefix
+    rdk_prefix="$(realpath "$VENV_DIR")/flexiv-rdk"
+    if [ ! -f "$rdk_prefix/lib/cmake/flexiv_rdk/flexiv_rdk-config.cmake" ]; then
+        echo "Building flexiv_rdk C++ dependencies (Eigen, spdlog, Fast-DDS, ...)..."
+        (cd "$sdk_dir/flexiv_rdk/thirdparty" \
+            && bash build_and_install_dependencies.sh "$rdk_prefix" "$(nproc)") \
+            || { echo "flexiv_rdk dependencies build failed" >&2; exit 1; }
+
+        echo "Building flexiv_rdk..."
+        # The RDK configure step downloads the prebuilt x86_64 static library
+        # (libflexiv_rdk.x86_64-linux-gnu.a) from GitHub; no sudo needed.
+        cmake -S "$sdk_dir/flexiv_rdk" -B "$sdk_dir/flexiv_rdk/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$rdk_prefix" \
+            -DCMAKE_PREFIX_PATH="$rdk_prefix" \
+            || { echo "flexiv_rdk CMake configuration failed" >&2; exit 1; }
+        cmake --build "$sdk_dir/flexiv_rdk/build" --target install -j"$(nproc)" \
+            || { echo "flexiv_rdk build failed" >&2; exit 1; }
+    else
+        echo "Reusing existing flexiv_rdk install at $rdk_prefix"
+    fi
+
+    # ---- 3. Build the pybind11 extension ----
+    # IMPORTANT: pass only the RDK prefix via CMAKE_PREFIX_PATH. Adding the
+    # venv prefix picks up the PyPI `spdlog` package headers (fmt ABI v10)
+    # while linking the RDK's spdlog (fmt ABI v8) -> undefined symbol errors.
+    local runtime_python build_dir
+    runtime_python="$(realpath "$VENV_DIR/bin/python")"
+    build_dir="$sdk_dir/build"
+    uv pip install pybind11
+    cmake -S "$sdk_dir" -B "$build_dir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="$rdk_prefix" \
+        -DPython3_EXECUTABLE:FILEPATH="$runtime_python" \
+        || { echo "libpyflexiv CMake configuration failed" >&2; exit 1; }
+    cmake --build "$build_dir" -j"$(nproc)" \
+        || { echo "libpyflexiv Python binding build failed" >&2; exit 1; }
+
+    # ---- 4. Install the flexiv_rt package into the uv venv ----
+    # Editable install only registers the source tree; the compiled .so is
+    # already emitted into flexiv_rt/ by the build above.
+    uv pip install -e "$sdk_dir"
+
+    # ---- 5. Expose the RDK runtime libraries ----
+    local activate_script="$VENV_DIR/bin/activate"
+    if ! grep -q 'FLEXIV_RDK_LIB' "$activate_script" 2>/dev/null; then
+        echo "export FLEXIV_RDK_LIB=\"$rdk_prefix/lib\"" >> "$activate_script"
+        echo 'export LD_LIBRARY_PATH="$FLEXIV_RDK_LIB:$LD_LIBRARY_PATH"' >> "$activate_script"
+    fi
+
+    # ---- 6. Verify ----
+    python -c \
+        "import flexiv_rt; \
+         assert hasattr(flexiv_rt, 'Robot'); \
+         assert hasattr(flexiv_rt, 'JointImpedanceControl'); \
+         assert hasattr(flexiv_rt, 'CartesianMotionForceControl'); \
+         assert hasattr(flexiv_rt, 'Mode'); \
+         print('libpyflexiv (flexiv_rt) import OK')"
+
+    echo
+    echo "libpyflexiv installation completed."
+    echo
+    echo "NOTE: real-time control creates SCHED_FIFO threads and requires root."
+    echo "Run robot scripts with sudo while preserving the venv, e.g.:"
+    echo "  sudo -E env PATH=\"\$PATH\" LD_LIBRARY_PATH=\"\$LD_LIBRARY_PATH\" python your_script.py"
 }
 
 install_robotwin_env() {

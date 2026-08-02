@@ -186,6 +186,8 @@ conflicts = [
       { extra = "franka" },
       { extra = "xsquare_turtle2" },
       { extra = "arx_x5_dual" },
+      # bi_flexiv shares the arx_x5_dual extra (identical headless OpenCV /
+      # NumPy ABI stack for real-robot inference); no separate extra needed.
       { extra = "gim_arm" }
     ],
 ]
