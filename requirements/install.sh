@@ -53,6 +53,10 @@ DISABLE_APEX=0
 # Platform torchcodec pin; when set it wins over the version-derived one (the
 # derived pin has no wheels on e.g. Ascend/aarch64). Set by configure_<platform>.
 PLATFORM_TORCHCODEC_SPEC=""
+# Space-separated CUDA tag candidates (without the "cu" prefix) used on
+# Blackwell (sm_120+) GPUs instead of the default full candidate list. Empty on
+# non-Blackwell GPUs. Set by configure_nvidia, read by detect_nvidia_torch_cuda_tag.
+BLACKWELL_CUDA_TAGS=""
 # Whether apply_torch_override should rewrite the pyproject.toml `torchcodec`
 # pin from ==0.2 to >=0.5. The ==0.2 line in override-dependencies has wheels
 # only for x86_64 + torch 2.5/2.6, so it breaks on AMD (torch 2.8 from rocm
@@ -86,7 +90,7 @@ NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_ENGINES=("sglang" "vllm")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "robocasa365" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "robocasa365" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris" "bi_flexiv")
 
 #=======================Utility Functions=======================
 
@@ -434,9 +438,12 @@ detect_nvidia_driver_max_cuda() {
 
 detect_nvidia_torch_cuda_tag() {
     local torch_ver="$1" index_base="$2" driver_num="$3"
-    local ver_re n listing
+    local ver_re n listing candidates
     ver_re=$(printf '%s' "$torch_ver" | sed 's/\./\\./g')
-    for n in 130 129 128 126 124 121 118; do
+    # On Blackwell (sm_120+) restrict to cu128+ candidates (see configure_nvidia);
+    # otherwise use the full newest-first list.
+    candidates="${BLACKWELL_CUDA_TAGS:-130 129 128 126 124 121 118}"
+    for n in $candidates; do
         [ "$n" -le "$driver_num" ] || continue
         listing=$(curl -fsSL --max-time 60 "${index_base}/cu${n}/torch/" 2>/dev/null) || continue
         if grep -qE "torch-${ver_re}(%2B|\+)cu${n}-" <<< "$listing"; then
@@ -499,6 +506,24 @@ configure_nvidia() {
             _index_base="https://mirrors.tencent.com/pytorch-wheels/whl"
         else
             _index_base="https://download.pytorch.org/whl"
+        fi
+        # Blackwell consumer GPUs (RTX 50-series, compute capability >= 12.0)
+        # only have sm_120 fatbins in cu128+ wheels; cu126 and earlier have no
+        # kernel image for them. Prefer cu128 (the officially-supported floor,
+        # best third-party/flash-attn/apex wheel coverage), then cu130 (native
+        # sm_120 SASS but newer ecosystem), then cu129. This caps the default
+        # "pick the newest tag" behaviour, which would otherwise land on cu130.
+        if [ -z "${UV_TORCH_BACKEND:-}" ] || [ "$UV_TORCH_BACKEND" = "$DEFAULT_BACKEND_NVIDIA" ]; then
+            local _ccap _ccaps
+            _ccaps=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null || true)
+            if [ -n "$_ccaps" ]; then
+                # Take the highest capability across GPUs.
+                _ccap=$(echo "$_ccaps" | sort -V | tail -1)
+                if [ "$(printf '%s\n12.0\n' "$_ccap" | sort -V | head -n1)" = "12.0" ]; then
+                    echo "[install.sh] Detected Blackwell GPU (compute capability ${_ccap}); restricting CUDA tag to cu128/cu130/cu129."
+                    BLACKWELL_CUDA_TAGS="128 130 129"
+                fi
+            fi
         fi
         if [ "$_cpu_only" -eq 1 ]; then
             PLATFORM_TORCH_STR=""
@@ -654,8 +679,28 @@ configure_platform() {
 # packages here rather than sprinkling them through target installers.
 
 install_nvidia_extras() {
-    : # CUDA torch from PyPI works out of the box; flash-attn/apex are wired
-      # into target installers where they are actually used.
+    # CUDA torch from PyPI works out of the box; flash-attn/apex are wired
+    # into target installers where they are actually used.
+
+    # Blackwell (sm_120) cross-node NCCL bug: torch's bundled NCCL (<2.28.9)
+    # has an out-of-bounds write in cross-node SendRecv that surfaces as
+    # 'illegal memory access' during multi-node training. Single-node runs do
+    # not hit that path, so we only warn here instead of overriding torch's
+    # pinned NCCL (which would needlessly risk every single-node Blackwell
+    # user). See RLinf#1041.
+    local ccap
+    ccap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | sort -V | tail -1 || true)
+    if [ -n "$ccap" ] && [ "$(printf '%s\n12.0\n' "$ccap" | sort -V | head -n1)" = "12.0" ]; then
+        local nccl_ver
+        nccl_ver=$(python -c "import importlib.metadata as m; print(m.version('nvidia-nccl-cu12'))" 2>/dev/null \
+            || python -c "import importlib.metadata as m; print(m.version('nvidia-nccl-cu13'))" 2>/dev/null || true)
+        if [ -n "$nccl_ver" ] && [ "$(printf '%s\n2.28.9\n' "$nccl_ver" | sort -V | head -n1)" != "2.28.9" ]; then
+            echo "[install.sh] WARNING: Blackwell GPU with NCCL ${nccl_ver} (<2.28.9)." >&2
+            echo "[install.sh] WARNING: multi-node training can hit an NCCL cross-node SendRecv" >&2
+            echo "[install.sh] WARNING: out-of-bounds write. For multi-node, upgrade with:" >&2
+            echo "[install.sh] WARNING:   uv pip install 'nvidia-nccl-cu12>=2.28.9'  (or the cu13 equivalent)" >&2
+        fi
+    fi
 }
 
 install_amd_extras() {
@@ -769,6 +814,7 @@ engine_needs_torch211() {
 agentic_cuda_line() {
     case "${PLATFORM_CUDA_TAG:-}" in
         cu13*) echo "cu13" ;;
+        # cu129 has no dedicated agentic build; it shares the cu12 line.
         *)     echo "cu12" ;;
     esac
 }
@@ -1000,7 +1046,7 @@ install_uv() {
                 echo "wget command not found. Please install wget first." >&2
                 exit 1
             fi
-            
+
             # If uv already exists in ~/.local/bin, use it
             if [ -f ~/.local/bin/uv ]; then
                 echo "uv already exists in ~/.local/bin. Using it..."
@@ -1603,6 +1649,13 @@ install_openpi_model() {
             uv pip install "rlinf-openpi==0.1.1"
             install_flash_attn
             ;;
+        bi_flexiv)
+            create_and_sync_venv
+            install_common_embodied_deps
+            install_bi_flexiv_realworld_env
+            uv pip install "rlinf-openpi==0.1.1"
+            install_flash_attn
+            ;;
         polaris)
             create_and_sync_venv
             install_common_embodied_deps
@@ -1628,7 +1681,7 @@ EOF
 )
     cp -r "$VENV_DIR/lib/python${py_major_minor}/site-packages/openpi/models_pytorch/transformers_replace/"* \
         "$VENV_DIR/lib/python${py_major_minor}/site-packages/transformers/"
-    
+
     bash $SCRIPT_DIR/embodied/download_assets.sh --assets openpi
     # rlinf-openpi pulls rlinf-transformer-openpi (a transformers 4.53 fork) into
     # the same package dir as the stock transformers, so two distributions claim
@@ -1926,6 +1979,225 @@ install_franka_realworld_env() {
     fi
 }
 
+install_bi_flexiv_realworld_env() {
+    install_lerobot
+    install_bi_flexiv_env
+}
+
+# Echo a cmake<4 executable path. flexiv_rdk's vendored deps (tinyxml2 8.0.0,
+# foonathan_memory, Fast-CDR, Fast-DDS) declare cmake_policy(SET CMP0063 OLD),
+# which CMake 4.x rejects outright with no override (CMAKE_POLICY_VERSION_MINIMUM
+# only rescues low cmake_minimum_required, not explicit SET OLD). Probe the
+# system first; fall back to an isolated uv venv holding the cmake<4 PyPI wheel.
+# Use the wheel's bundled data/bin/cmake directly -- the venv's console-script
+# wrapper misresolves outside an activated venv.
+_bi_flexiv_legacy_cmake() {
+    local _c _cpath
+    for _c in /usr/bin/cmake cmake3; do
+        _cpath="$(command -v "$_c" 2>/dev/null)" || continue
+        if "$_cpath" --version | head -1 | grep -qE 'version [123]\.'; then
+            echo "$_cpath"
+            return 0
+        fi
+    done
+    local cmake3_venv="${XDG_CACHE_HOME:-$HOME/.cache}/rlinf/cmake3-venv"
+    _cpath="$(compgen -G "$cmake3_venv/lib/python*/site-packages/cmake/data/bin/cmake" 2>/dev/null | head -1 || true)"
+    if [ -z "$_cpath" ] || [ ! -x "$_cpath" ]; then
+        echo "[install.sh] No system cmake<4; provisioning cmake<4 from PyPI into $cmake3_venv" >&2
+        uv venv --python 3.11 "$cmake3_venv" >/dev/null \
+            && uv pip install --quiet --python "$cmake3_venv/bin/python" "cmake<4"
+        _cpath="$(compgen -G "$cmake3_venv/lib/python*/site-packages/cmake/data/bin/cmake" 2>/dev/null | head -1 || true)"
+    fi
+    if [ -z "$_cpath" ] || [ ! -x "$_cpath" ] \
+        || ! "$_cpath" --version | head -1 | grep -qE 'version [123]\.'; then
+        echo "[install.sh] ERROR: could not provision a cmake<4 to build flexiv_rt." >&2
+        return 1
+    fi
+    echo "$_cpath"
+}
+
+# Build and install flexiv_rt (libpyflexiv) into the venv. Adapted from
+# lerobot-xense's setup_env.sh install_flexiv(), with the conda-specific hacks
+# (libstdc++ sitecustomize, conda hidapi) dropped -- a uv venv links the system
+# libstdc++ and system hidapi directly. Everything lives under the venv:
+# the source checkout and the RDK install prefix both default to $VENV_DIR.
+install_bi_flexiv_flexiv_rt() {
+    local lib_dir="$1"
+    local rdk_install="${RDK_INSTALL_PATH:-$VENV_DIR/rdk_install}"
+    # Normalize to absolute paths: the stage-1 subshell cd's into the vendored
+    # source tree, where a relative prefix (the default VENV_DIR is ".venv")
+    # would silently install the C++ deps under
+    # flexiv_rdk/thirdparty/cloned/<dep>/build/ -- Fast-DDS then fails with
+    # "Cannot find package TinyXML2".
+    lib_dir="$(readlink -f "$lib_dir")"
+    mkdir -p "$rdk_install"
+    rdk_install="$(readlink -f "$rdk_install")"
+
+    local legacy_cmake cmake_shim
+    legacy_cmake="$(_bi_flexiv_legacy_cmake)" || return 1
+    cmake_shim="$(mktemp -d)"
+    # Shim dir holding a single `cmake` symlink; prepended to PATH so the bare
+    # `cmake` calls inside the vendored build scripts and the pip build backend
+    # also resolve to the legacy binary.
+    ln -sf "$legacy_cmake" "$cmake_shim/cmake"
+    echo "[install.sh] Using $("$legacy_cmake" --version | head -1) for flexiv_rt builds"
+
+    # Nested submodule safety net (--recurse-submodules at clone normally covers it).
+    if [ ! -f "$lib_dir/flexiv_rdk/thirdparty/build_and_install_dependencies.sh" ]; then
+        echo "[install.sh] Initializing flexiv_rdk submodule..."
+        git -C "$lib_dir" submodule update --init flexiv_rdk || {
+            echo "[install.sh] ERROR: failed to init flexiv_rdk submodule." >&2
+            return 1
+        }
+    fi
+
+    # Stage 1: build the RDK static lib + its C++ deps (eigen, spdlog, tinyxml2,
+    # foonathan_memory, Fast-CDR, Fast-DDS) into rdk_install. One-time, ~10-30 min;
+    # idempotent -- skip if a previous run already populated it.
+    if [ ! -f "$rdk_install/include/flexiv/rdk/robot.hpp" ]; then
+        echo "[install.sh] Building Flexiv RDK + C++ deps into $rdk_install (one-time)"
+        (
+            set -e
+            export PATH="$cmake_shim:$PATH"
+            export CMAKE_POLICY_VERSION_MINIMUM=3.5
+            # Force Fast-DDS to use its OWN vendored asio, not a system
+            # libasio-dev: find_path searches CMAKE_PREFIX_PATH before system
+            # dirs, and the bundled-asio prefix is passed with -I whereas a
+            # system-prefix hit emits none (breaking the build on hosts with
+            # libasio-dev installed).
+            export CMAKE_PREFIX_PATH="$lib_dir/flexiv_rdk/thirdparty/cloned/Fast-DDS/thirdparty/asio/asio${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+            cd "$lib_dir/flexiv_rdk/thirdparty"
+            bash build_and_install_dependencies.sh "$rdk_install" "$(nproc)"
+            cd "$lib_dir/flexiv_rdk"
+            rm -rf build && mkdir -p build && cd build
+            "$legacy_cmake" .. \
+                -DCMAKE_INSTALL_PREFIX="$rdk_install" \
+                -DCMAKE_PREFIX_PATH="$rdk_install"
+            "$legacy_cmake" --build . --target install --config Release -j"$(nproc)"
+        ) || {
+            echo "[install.sh] ERROR: Flexiv RDK dependency build failed." >&2
+            return 1
+        }
+    else
+        echo "[install.sh] Reusing existing RDK install: $rdk_install"
+    fi
+
+    # Stage 2: Python bindings. Pin TinyXML2 to the STATIC 8.0.0 build inside
+    # rdk_install: find_package(TinyXML2) only matches tinyxml2-config.cmake /
+    # TinyXML2Config.cmake filenames, while the RDK deps install
+    # tinyxml2Config.cmake (no match) -- without the alias it would silently
+    # pick up a system tinyxml2 11.x shared lib, and Fast-DDS (compiled against
+    # 8.0.0) then segfaults in XMLProfileManager::loadDefaultXMLFile().
+    local tx2_cmake_dir="$rdk_install/lib/cmake/tinyxml2"
+    if [ -f "$tx2_cmake_dir/tinyxml2Config.cmake" ]; then
+        ln -sf tinyxml2Config.cmake "$tx2_cmake_dir/tinyxml2-config.cmake"
+        [ -f "$tx2_cmake_dir/tinyxml2ConfigVersion.cmake" ] && \
+            ln -sf tinyxml2ConfigVersion.cmake "$tx2_cmake_dir/tinyxml2-config-version.cmake"
+    fi
+
+    local build_dir="$lib_dir/build"
+    rm -rf "$build_dir" && mkdir -p "$build_dir"
+    # IMPORTANT: only pass rdk_install as CMAKE_PREFIX_PATH. Do NOT include the
+    # venv prefix -- it can expose a different spdlog and cause header conflicts.
+    "$legacy_cmake" -S "$lib_dir" -B "$build_dir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="$rdk_install" \
+        -DTinyXML2_DIR="$tx2_cmake_dir" \
+        -DPython3_EXECUTABLE="$(which python)"
+    "$legacy_cmake" --build "$build_dir" -j"$(nproc)"
+
+    # The editable install re-runs the build backend's bare `cmake`; the shim
+    # on PATH keeps it on the legacy cmake too.
+    PATH="$cmake_shim:$PATH" uv pip install -e "$lib_dir" --no-build-isolation
+    rm -rf "$cmake_shim"
+}
+
+# Build and install xensegripper (XGripper, with vendored libsurvive).
+install_bi_flexiv_xgripper() {
+    local gripper_dir="$1"
+    if [ ! -f "$gripper_dir/pyproject.toml" ]; then
+        echo "[install.sh] ERROR: $gripper_dir missing pyproject.toml (submodules not initialized?)." >&2
+        return 1
+    fi
+    # Upstream declares `license = "Apache-2.0"` (SPDX string), which only
+    # setuptools>=77 accepts; the venv pins setuptools<75.9 for openpi.
+    # Rewrite to the legacy { text = ... } form idempotently -- this edits the
+    # cloned XGripper checkout in place.
+    sed -i -E 's/^license = "([^"]+)"$/license = { text = "\1" }/' "$gripper_dir/pyproject.toml"
+    # libsurvive links -lhidapi-libusb. A uv venv uses the system gcc (no conda
+    # cross-compiler sysroot isolation), so the system hidapi installed via apt
+    # is found directly; LIBRARY_PATH is a fallback for non-standard prefixes.
+    # --no-deps: XGripper's declared PyPI deps are incomplete; --no-build-isolation
+    # keeps the build on the env's cmake instead of a freshly fetched PyPI one.
+    # CMAKE_PREFIX_PATH points libsurvive's find_package(Eigen3) at the
+    # INSTALLED eigen in rdk_install: the vendored eigen build registers its
+    # (headerless) source build dir in ~/.cmake/packages, which otherwise wins
+    # the lookup and breaks cnmatrix's version check. Must be ABSOLUTE -- the
+    # pip build backend runs with a different cwd, so a relative
+    # "$VENV_DIR/rdk_install" would resolve to nothing.
+    local rdk_install_abs
+    rdk_install_abs="$(readlink -f "${RDK_INSTALL_PATH:-$VENV_DIR/rdk_install}")"
+    LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LIBRARY_PATH:+:$LIBRARY_PATH}" \
+        CMAKE_PREFIX_PATH="$rdk_install_abs${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}" \
+        uv pip install -e "$gripper_dir" --no-deps --no-build-isolation
+}
+
+install_bi_flexiv_env() {
+    if [ "$NO_ROOT" -eq 0 ]; then
+        # libudev-dev: libsurvive links -ludev, and only the runtime lib
+        # (libudev.so.1) is present without the dev package's .so symlink.
+        sudo apt-get install -y --no-install-recommends \
+            libhidapi-libusb0 libhidapi-dev libusb-1.0-0-dev libudev-dev \
+            zlib1g-dev libcap2-bin
+    else
+        echo "[install.sh] --no-root: assuming hidapi/libusb/zlib/libcap2-bin are already installed."
+    fi
+
+    # Two standalone SDK repos (not lerobot-xense itself): each carries its own
+    # submodules (flexiv_rdk / libsurvive) and builds against plain python+cmake,
+    # so the heavy lerobot-xense conda stack is unnecessary.
+    local libpyflexiv_dir xgripper_dir
+    libpyflexiv_dir=$(clone_or_reuse_repo LIBPYFLEXIV_PATH \
+        "$VENV_DIR/libpyflexiv" \
+        ${GITHUB_PREFIX}https://github.com/Vertax42/libpyflexiv.git \
+        --recurse-submodules)
+    xgripper_dir=$(clone_or_reuse_repo XGRIPPER_PATH \
+        "$VENV_DIR/XGripper" \
+        ${GITHUB_PREFIX}https://github.com/Vertax42/XGripper.git \
+        --recurse-submodules)
+
+    install_bi_flexiv_flexiv_rt "$libpyflexiv_dir"
+    install_bi_flexiv_xgripper "$xgripper_dir"
+
+    # flexivrdk NRT SDK + optional xensesdk stack for the tactile cameras.
+    uv pip install -r "$SCRIPT_DIR/embodied/envs/bi_flexiv.txt"
+
+    # flexiv_rt spawns 1 kHz SCHED_FIFO RT control threads; raising thread
+    # priority needs CAP_SYS_NICE, otherwise the RDK silently downgrades the
+    # control loop to normal scheduling (jittery, unsafe on real hardware).
+    if [ "$NO_ROOT" -eq 0 ]; then
+        local py_real
+        py_real="$(readlink -f "$VENV_DIR/bin/python")"
+        if command -v setcap >/dev/null 2>&1; then
+            sudo setcap cap_sys_nice=ep "$py_real" \
+                && echo "[install.sh] Granted cap_sys_nice to $py_real (verify: getcap $py_real)" \
+                || echo "[install.sh] WARNING: setcap failed; flexiv_rt RT threads will run at normal priority." >&2
+        else
+            echo "[install.sh] WARNING: setcap not found (install libcap2-bin); RT priority unavailable." >&2
+        fi
+    fi
+
+    # udev rules for the XGripper serial line (and Vive trackers, if present).
+    if [ "$NO_ROOT" -eq 0 ] && [ -f "$xgripper_dir/third_party/libsurvive/useful_files/81-vive.rules" ]; then
+        sudo cp "$xgripper_dir/third_party/libsurvive/useful_files/81-vive.rules" /etc/udev/rules.d/
+        sudo udevadm control --reload-rules && sudo udevadm trigger
+    fi
+
+    echo "[install.sh] bi_flexiv env installed. Verify with:"
+    echo "  python -c 'import flexiv_rt; print(flexiv_rt.__file__)'"
+    echo "  python -c 'import xensegripper; print(xensegripper.__file__)'"
+}
+
 install_env_only() {
     if [ "$ENV_NAME" = "d4rl" ]; then
         PYTHON_VERSION="3.10"
@@ -1952,6 +2224,10 @@ install_env_only() {
                 bash $SCRIPT_DIR/embodied/franky_install.sh
             fi
             install_franka_franky_env
+            ;;
+        bi_flexiv)
+            install_common_embodied_deps
+            install_bi_flexiv_realworld_env
             ;;
         xsquare_turtle2)
             uv sync --extra xsquare_turtle2 --active $NO_INSTALL_RLINF_CMD
@@ -2139,7 +2415,7 @@ install_behavior_env() {
     pushd "$behavior_dir" >/dev/null
     UV_LINK_MODE=hardlink ./setup.sh --omnigibson --bddl --joylo --confirm-no-conda --accept-nvidia-eula --use-uv
     # OmniGibson's eval deps need another commit of lerobot, which is in conflict with which rlinf needs.
-    # We actually does not use OmniGibson's lerobot deps, so just install other deps in OmniGibson's eval deps. 
+    # We actually does not use OmniGibson's lerobot deps, so just install other deps in OmniGibson's eval deps.
     uv pip install "dm_tree>=0.1.9" "hydra-core>=1.3.2" "websockets>=15.0.1" "msgpack>=1.1.0" "gspread>=6.2.1" "open3d>=0.19.0" av "numpy<2"
     popd >/dev/null
     uv pip uninstall flash-attn || true
@@ -2180,7 +2456,7 @@ install_polaris_env() {
     uv pip install "flatdict==4.0.1" --no-build-isolation
     uv pip install sympy==1.13.3
     uv pip install -e "$polaris_dir"
-    
+
     python - <<'EOF'
 import isaacsim
 EOF
@@ -2205,7 +2481,7 @@ install_isaaclab_env() {
 install_robocasa_env() {
     local robocasa_dir
     robocasa_dir=$(clone_or_reuse_repo ROBOCASA_PATH "$VENV_DIR/robocasa" https://github.com/RLinf/robocasa.git)
-    
+
     uv pip install -e "$robocasa_dir"
     uv pip install protobuf==6.33.0
     python -m robocasa.scripts.setup_macros
@@ -2365,7 +2641,7 @@ install_robotwin_env() {
     # ----------- before -----------
     # 667         with open(urdf_file, "r") as f:
     # 668             urdf_string = f.read()
-    # 669 
+    # 669
     # 670         if srdf_file is None:
     # 671             srdf_file = urdf_file[:-4] + "srdf"
     # 672         if os.path.isfile(srdf_file):
@@ -2374,7 +2650,7 @@ install_robotwin_env() {
     # ----------- after  -----------
     # 667         with open(urdf_file, "r", encoding="utf-8") as f:
     # 668             urdf_string = f.read()
-    # 669 
+    # 669
     # 670         if srdf_file is None:
     # 671             srdf_file = urdf_file[:-4] + ".srdf"
     # 672         if os.path.isfile(srdf_file):
@@ -2387,7 +2663,7 @@ install_robotwin_env() {
     # ----------- before -----------
     # 807             if np.linalg.norm(delta_twist) < 1e-4 or collide or not within_joint_limit:
     # 808                 return {"status": "screw plan failed"}
-    # ----------- after  ----------- 
+    # ----------- after  -----------
     # 807             if np.linalg.norm(delta_twist) < 1e-4 or not within_joint_limit:
     # 808                 return {"status": "screw plan failed"}
     PLANNER=$MPLIB_LOCATION/planner.py
@@ -2480,9 +2756,9 @@ install_opensora_world_model() {
     # Clone opensora repository
     local opensora_dir
     opensora_dir=$(clone_or_reuse_repo OPENSORA_PATH "$VENV_DIR/opensora" ${GITHUB_PREFIX}https://github.com/RLinf/opensora.git)
-    
+
     uv pip install -e "$opensora_dir"
-    
+
     # xformers embeds the torch version in its local label; 0.0.35 ships
     # wheels for torch 2.11. Install it against the resolved torch build.
     uv pip install "xformers==0.0.35"
@@ -2522,7 +2798,7 @@ install_roboverse_env() {
     uv pip install git+${GITHUB_PREFIX}https://github.com/facebookresearch/pytorch3d.git@v0.7.9 --no-build-isolation
     uv pip install -e "${roboverse_dir}[sapien3]"
     uv pip install -e "${roboverse_dir}[genesis]"
-    
+
     local pyroki_dir
     pyroki_dir=$(clone_or_reuse_repo PYROKI_PATH "$roboverse_dir/pyroki" https://github.com/chungmin99/pyroki.git)
     uv pip install -e "$pyroki_dir"
@@ -2734,8 +3010,8 @@ main() {
                 dexbotic)
                     install_dexbotic_model
                     ;;
-                lingbotvla)                  
-                    install_lingbot_vla_model 
+                lingbotvla)
+                    install_lingbot_vla_model
                     ;;
                 abot_m0)
                     install_abot_m0_model

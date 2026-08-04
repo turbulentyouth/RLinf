@@ -1,0 +1,29 @@
+# bi_flexiv (Flexiv Rizon4 RT dual-arm) env dependencies.
+# flexiv_rt (RT bindings) and xensegripper (serial gripper) are built from
+# source by install_bi_flexiv_env in requirements/install.sh; this file holds
+# the pure-PyPI pins installed right after them.
+
+# Flexiv non-real-time Python SDK, used for reset / homing / plan execution
+# alongside the RT bindings. Must match the flexiv_rdk v1.8 that libpyflexiv
+# builds against.
+flexivrdk==1.8.0
+
+# Optional Xense tactile-sensor stack. xensesdk is installed --no-deps so its
+# own constraints (notably cryptography==43.0.3) cannot downgrade the env; the
+# mandatory runtime deps are pinned explicitly above it instead. The published
+# xensesdk wheel is cp312-only, so these lines only apply when the venv is
+# created with --python 3.12; on the default 3.11 venv comment this section
+# out (serial-gripper-only setups do not need it).
+#numpy>=1.26.4,<2.3.0
+#opencv-python>=4.10
+#cryptography>=46.0
+#h5py>=3.10
+#scipy>=1.14
+#lz4>=4.0
+#spdlog>=2.0
+#cypack>=0.1.2
+#ormsgpack>=1.11.0
+#cyclonedds-nightly==2025.7.29
+#pyudev; platform_system=='Linux'
+#--no-deps xensesdk==2.0.1
+#av==15.1.0
