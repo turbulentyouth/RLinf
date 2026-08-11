@@ -845,6 +845,8 @@ class EnvWorker(Worker):
         return sparse_rewards
 
     def assign_history_reward(self, stage_id: int, reward_model_output: torch.Tensor):
+        if not self.history_lengths[stage_id]:
+            return
         reward_assign_lengths = [
             min(
                 history_buffer_length[env_id]

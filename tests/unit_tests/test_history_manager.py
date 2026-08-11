@@ -75,3 +75,12 @@ def test_build_history_input_emits_on_interval_tick():
         torch.tensor([12]),
         torch.tensor([13]),
     ]
+
+
+def test_assign_history_reward_skips_empty_interval():
+    from rlinf.workers.env.env_worker import EnvWorker
+
+    worker = object.__new__(EnvWorker)
+    worker.history_lengths = [{}]
+
+    worker.assign_history_reward(stage_id=0, reward_model_output=torch.tensor([1.0]))

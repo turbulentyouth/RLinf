@@ -15,6 +15,9 @@
 """Reward models for embodied RL."""
 
 from rlinf.models.embodiment.reward.base_reward_model import BaseRewardModel
+from rlinf.models.embodiment.reward.dashscope_vlm_reward_model import (
+    DashScopeHistoryVLMRewardModel,
+)
 from rlinf.models.embodiment.reward.resnet_reward_model import ResNetRewardModel
 from rlinf.models.embodiment.reward.vlm_reward_model import (
     HistoryVLMRewardModel,
@@ -26,12 +29,14 @@ __all__ = [
     "ResNetRewardModel",
     "VLMRewardModel",
     "HistoryVLMRewardModel",
+    "DashScopeHistoryVLMRewardModel",
 ]
 
 reward_model_registry = {
     "resnet": ResNetRewardModel,
     "vlm": VLMRewardModel,
     "history_vlm": HistoryVLMRewardModel,
+    "dashscope_history_vlm": DashScopeHistoryVLMRewardModel,
 }
 
 

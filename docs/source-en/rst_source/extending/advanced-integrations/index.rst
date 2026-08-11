@@ -17,6 +17,8 @@ environment.
      - Optimize actor-to-rollout weight sync in embodied training.
    * - :doc:`Reward Model Workflow <../reward_model>`
      - Use image-classification and VLM reward models.
+   * - :doc:`Flexiv QwenTrend <flexiv_qwen_reward/index>`
+     - Build a Flexiv-specific Qwen3-VL trend-reward workflow, locally or through a cloud API.
 
 .. toctree::
    :hidden:
@@ -24,3 +26,4 @@ environment.
    Megatron-Bridge <../mbridge>
    Weight Synchronization <../weight_syncer>
    Reward Model Workflow <../reward_model>
+   Flexiv QwenTrend <flexiv_qwen_reward/index>

@@ -34,6 +34,7 @@ dependencies = [
     "torch>=2.7.0",
     "hydra-core",
     "numpy",
+    "pillow",
 
     # Data processing
     "datasets",

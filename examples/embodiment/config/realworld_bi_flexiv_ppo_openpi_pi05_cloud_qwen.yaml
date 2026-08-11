@@ -1,0 +1,210 @@
+# Flexiv Rizon4 dual-arm online PPO with a local OpenPI pi0.5 policy and a
+# cloud Qwen-VL trend reward. The committed defaults are safe: is_dummy=true
+# prevents hardware access. Read the Flexiv QwenTrend docs before changing it.
+
+defaults:
+  - env/realworld_bi_flexiv_tcp@env.train
+  - env/realworld_bi_flexiv_tcp@env.eval
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  # This starter config puts policy, robot env, and cloud reward worker on one
+  # machine. Split them into node_groups after the single-node dry run passes.
+  num_nodes: 1
+  component_placement:
+    actor: 0-0
+    rollout: 0-0
+    env: 0-0
+    reward: 0-0
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "bi_flexiv_pi05_cloud_qwen_ppo"
+    logger_backends: ["tensorboard"]
+  # Keep the first run short. Increase only after dummy and hardware-shadow runs.
+  max_epochs: 100
+  max_steps: 5
+  only_eval: false
+  val_check_interval: -1
+  save_interval: 1
+  resume_dir: null
+  ckpt_path: null
+  per_worker_log: false
+  per_worker_log_path: null
+  weight_sync_interval: 1
+
+algorithm:
+  normalize_advantages: true
+  kl_penalty: kl
+  kl_penalty_type: low_var_kl
+  calculate_entropy: false
+  group_size: 1
+  reward_type: action_level
+  logprob_type: action_level
+  entropy_type: action_level
+  update_epoch: 2
+  adv_type: gae
+  loss_type: actor_critic
+  loss_agg_func: "token-mean"
+  bootstrap_type: always
+  kl_beta: 0.0
+  entropy_bonus: 0.0
+  clip_ratio_high: 0.1
+  clip_ratio_low: 0.1
+  clip_ratio_c: 3.0
+  value_clip: 0.2
+  huber_delta: 10.0
+  gamma: 0.99
+  gae_lambda: 0.95
+  filter_rewards: false
+
+data:
+  # One real robot produces one trajectory sequence per rollout epoch.
+  rollout_batch_size: 1
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: false
+  train:
+    rollout_epoch: 1
+    total_num_envs: 1
+    group_size: 1
+    auto_reset: false
+    ignore_terminations: false
+    # pi0.5 emits a 50-step horizon, but only the first action is executed before
+    # a fresh observation. This keeps cloud reward and hardware motion aligned.
+    max_steps_per_rollout_epoch: 20
+    max_episode_steps: 300
+    override_cfg:
+      task_description: "${oc.env:FLEXIV_TASK_DESCRIPTION,Put the object into the box.}"
+      # Default: no robot or camera connection; observations are zero tensors.
+      is_dummy: true
+      # When is_dummy=false, keep dry_run=true for the first camera/API shadow run.
+      dry_run: true
+  eval:
+    rollout_epoch: 1
+    total_num_envs: 1
+    group_size: 1
+    auto_reset: false
+    ignore_terminations: false
+    max_steps_per_rollout_epoch: 20
+    max_episode_steps: 300
+    override_cfg:
+      task_description: "${oc.env:FLEXIV_TASK_DESCRIPTION,Put the object into the box.}"
+      is_dummy: true
+      dry_run: true
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: false
+  enable_offload: false
+  pipeline_stage_num: 1
+  collect_prev_infos: true
+  collect_transitions: false
+  model:
+    # The checkpoint must contain model weights and bi_flexiv normalization stats.
+    model_path: "${oc.env:FLEXIV_PI05_MODEL_PATH}"
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 1
+  global_batch_size: 1
+  seed: 0
+  enable_offload: false
+  model:
+    model_path: "${oc.env:FLEXIV_PI05_MODEL_PATH}"
+    model_type: "openpi"
+    precision: null
+    add_value_head: true
+    num_action_chunks: 1
+    action_dim: 20
+    num_steps: 4
+    openpi:
+      config_name: "pi05_bi_flexiv"
+      num_images_in_input: 3
+      action_horizon: 50
+      value_after_vlm: true
+      noise_method: "flow_noise"
+      noise_params: [0.16, 0.12, 200]
+      joint_logprob: true
+      train_expert_only: true
+  optim:
+    lr: 1.0e-6
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    critic_warmup_steps: 2
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: false
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: true
+  group_name: "RewardGroup"
+  reward_mode: history_buffer
+  # Assign one trend judgment to the complete five-step window.
+  history_reward_assign: true
+  reward_threshold: 0.5
+  # BiFlexivDualEnv.step() currently returns 0.0, so the cloud VLM is the
+  # effective learning signal in the dummy demonstration and online RL mode.
+  reward_weight: 1.0
+  env_reward_weight: 0.0
+  model:
+    model_type: "dashscope_history_vlm"
+    api_key_env: "DASHSCOPE_API_KEY"
+    api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    api_model: "${oc.env:QWEN_API_MODEL}"
+    api_timeout: 30.0
+    api_max_retries: 2
+    api_retry_backoff: 0.5
+    api_max_tokens: 16
+    api_temperature: 0.0
+    # RealWorldEnv sorts extra views as [left_wrist, right_wrist].
+    extra_view_index: 0
+    default_task_description: ${env.train.override_cfg.task_description}
+    reward_parser_name: qwentrend_reward_parser
+    reward_parser_params:
+      positive_reward: 1.0
+      negative_reward: -0.2
+      unclear_reward: 0.0
+      invalid_reward: 0.0
+    history_buffers:
+      history_window:
+        history_size: 5
+        min_history_size: 5
+        # Request cloud reward every five executed actions.
+        input_interval: 5
+        history_keys:
+          - main_images
+          - extra_view_images
+        input_on_done: false
+    interval_reward: 0.0
+    gt_success_bonus: 0.0
+
+critic:
+  # PPO value prediction is provided by actor.model.add_value_head.
+  use_critic_model: false

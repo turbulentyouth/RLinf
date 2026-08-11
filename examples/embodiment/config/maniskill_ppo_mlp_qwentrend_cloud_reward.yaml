@@ -1,0 +1,42 @@
+defaults:
+  - maniskill_ppo_mlp_qwentrend_reward
+
+runner:
+  logger:
+    experiment_name: "maniskill_ppo_mlp_qwentrend_cloud_shadow"
+
+reward:
+  # Shadow mode: the API is exercised and logged, but its score does not update
+  # the policy. Calibrate the cloud judge before increasing reward_weight.
+  reward_weight: 0.0
+  env_reward_weight: 1.0
+  model:
+    model_type: "dashscope_history_vlm"
+    api_key_env: "DASHSCOPE_API_KEY"
+    api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    api_model: "${oc.env:QWEN_API_MODEL}"
+    api_timeout: 30.0
+    api_max_retries: 2
+    api_retry_backoff: 0.5
+    api_max_tokens: 16
+    api_temperature: 0.0
+    extra_view_index: 0
+    default_task_description: >-
+      Pick up the red cube and place it on the green spot on the table.
+    reward_parser_name: qwentrend_reward_parser
+    reward_parser_params:
+      positive_reward: 1.0
+      negative_reward: -0.2
+      unclear_reward: 0.0
+      invalid_reward: 0.0
+    history_buffers:
+      history_window:
+        history_size: 5
+        min_history_size: 5
+        input_interval: 5
+        history_keys:
+          - main_images
+          - extra_view_images
+        input_on_done: false
+    interval_reward: 0.0
+    gt_success_bonus: 0.0

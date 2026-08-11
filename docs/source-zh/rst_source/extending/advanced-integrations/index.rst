@@ -16,6 +16,8 @@
      - 优化具身训练中 actor 到 rollout 的权重同步。
    * - :doc:`奖励模型流程 <../reward_model>`
      - 使用图像分类与 VLM 奖励模型。
+   * - :doc:`Flexiv QwenTrend <flexiv_qwen_reward/index>`
+     - 为 Flexiv 构建基于本地或云端 API 的 Qwen3-VL 趋势奖励流程。
 
 .. toctree::
    :hidden:
@@ -23,3 +25,4 @@
    Megatron-Bridge <../mbridge>
    权重同步 <../weight_syncer>
    奖励模型流程 <../reward_model>
+   Flexiv QwenTrend <flexiv_qwen_reward/index>
