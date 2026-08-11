@@ -8,22 +8,32 @@
 # builds against.
 flexivrdk==1.8.0
 
-# Optional Xense tactile-sensor stack. xensesdk is installed --no-deps so its
-# own constraints (notably cryptography==43.0.3) cannot downgrade the env; the
-# mandatory runtime deps are pinned explicitly above it instead. The published
-# xensesdk wheel is cp312-only, so these lines only apply when the venv is
-# created with --python 3.12; on the default 3.11 venv comment this section
-# out (serial-gripper-only setups do not need it).
-#numpy>=1.26.4,<2.3.0
-#opencv-python>=4.10
-#cryptography>=46.0
-#h5py>=3.10
-#scipy>=1.14
-#lz4>=4.0
-#spdlog>=2.0
-#cypack>=0.1.2
-#ormsgpack>=1.11.0
-#cyclonedds-nightly==2025.7.29
-#pyudev; platform_system=='Linux'
-#--no-deps xensesdk==2.0.1
-#av==15.1.0
+# pyserial: XGripper's serial-line driver. install_bi_flexiv_xgripper installs
+# the package with --no-deps, so its runtime deps are pinned here instead.
+pyserial>=3.5
+
+# pyrealsense2: head-camera backend for the bi-flexiv station
+# (rlinf.envs.realworld.common.camera.RealSenseCamera).
+pyrealsense2
+
+# === Xense tactile-sensor stack (required by the xensegripper import chain) ===
+# xensegripper's top-level imports pull in xensesdk via its controller
+# package, so even serial-gripper-only setups need this stack (pyserial alone
+# is not enough). xensesdk itself is installed by install_bi_flexiv_env with
+# `uv pip install --no-deps` (uv rejects inline --no-deps in requirements
+# files), because its own constraints (notably cryptography==43.0.3) would
+# otherwise downgrade the env; the mandatory runtime deps are pinned
+# explicitly here instead. The published xensesdk wheel is cp312-only, which
+# is why the bi-flexiv venv is pinned to Python 3.12.12 in install.sh.
+numpy>=1.26.4,<2.3.0
+opencv-python>=4.10
+cryptography>=46.0
+h5py>=3.10
+scipy>=1.14
+lz4>=4.0
+spdlog>=2.0
+cypack>=0.1.2
+ormsgpack>=1.11.0
+cyclonedds-nightly==2025.7.29
+pyudev; platform_system=='Linux'
+av==15.1.0

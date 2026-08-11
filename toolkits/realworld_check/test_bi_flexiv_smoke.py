@@ -40,6 +40,7 @@ Run:
 """
 
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -264,19 +265,29 @@ class XenseGripperSmoke:
         )
 
     @staticmethod
+    def _sn_trailing_digits(sn: str) -> int | None:
+        """Trailing run of digits in a board SN, e.g. ``"XG0042"`` -> 42.
+
+        Mirrors lerobot-xense's ``serial_discovery.sn_side``: board SNs are
+        ASCII strings (``"XG0042"``), so parity is taken from their trailing
+        numeric run rather than ``int()`` over the whole string.
+        """
+        match = re.search(r"(\d+)\s*$", sn.strip())
+        return int(match.group(1)) if match else None
+
+    @staticmethod
     def _scan_ports() -> list[tuple[str, int]]:
         import glob
 
-        from xensegripper import XenseSerialGripper
+        from xensegripper import read_board_sn
 
         results = []
         for port in sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")):
             try:
-                g = XenseSerialGripper(port=port, timeout=0.3)
-                info = g.get_device_info()
-                sn = int(info.get("sn", info.get("board_sn", -1)))
-                results.append((port, sn))
-                g.release()
+                sn = read_board_sn(port)
+                digits = XenseGripperSmoke._sn_trailing_digits(sn) if sn else None
+                if digits is not None:
+                    results.append((port, digits))
             except Exception:
                 continue
         return results

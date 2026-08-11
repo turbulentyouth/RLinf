@@ -1650,6 +1650,11 @@ install_openpi_model() {
             install_flash_attn
             ;;
         bi_flexiv)
+            # xensesdk (required by the xensegripper import chain) publishes
+            # cp312-only wheels, so the bi-flexiv venv is pinned to Python
+            # 3.12.12 (exact patch: uv venv --python 3.12.12 resolves
+            # precisely).
+            PYTHON_VERSION="3.12.12"
             create_and_sync_venv
             install_common_embodied_deps
             install_bi_flexiv_realworld_env
@@ -2169,8 +2174,13 @@ install_bi_flexiv_env() {
     install_bi_flexiv_flexiv_rt "$libpyflexiv_dir"
     install_bi_flexiv_xgripper "$xgripper_dir"
 
-    # flexivrdk NRT SDK + optional xensesdk stack for the tactile cameras.
+    # flexivrdk NRT SDK + PyPI runtime deps: pyserial, pyrealsense2, and the
+    # xensesdk stack required by xensegripper's import chain (cp312-only; the
+    # bi-flexiv venv is pinned to Python 3.12.12 by its install entry points).
     uv pip install -r "$SCRIPT_DIR/embodied/envs/bi_flexiv.txt"
+    # xensesdk is installed --no-deps so its own constraints (notably
+    # cryptography==43.0.3) cannot downgrade the env.
+    uv pip install --no-deps "xensesdk==2.0.1"
 
     # flexiv_rt spawns 1 kHz SCHED_FIFO RT control threads; raising thread
     # priority needs CAP_SYS_NICE, otherwise the RDK silently downgrades the
@@ -2201,6 +2211,12 @@ install_bi_flexiv_env() {
 install_env_only() {
     if [ "$ENV_NAME" = "d4rl" ]; then
         PYTHON_VERSION="3.10"
+    fi
+    if [ "$ENV_NAME" = "bi_flexiv" ]; then
+        # xensesdk (required by the xensegripper import chain) publishes
+        # cp312-only wheels, so the bi-flexiv venv is pinned to Python 3.12.12
+        # (exact patch: uv venv --python 3.12.12 resolves precisely).
+        PYTHON_VERSION="3.12.12"
     fi
     create_and_sync_venv
     SKIP_ROS=${SKIP_ROS:-0}
