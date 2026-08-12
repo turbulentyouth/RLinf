@@ -107,6 +107,7 @@ RL
    SAC-Flow <embodied/sac_flow>
    DSRL <embodied/dsrl>
    RECAP <embodied/recap>
+   Bi-Flexiv RECAP <embodied/recap_bi_flexiv>
    STEAM <embodied/steam>
    Co-Training <embodied/co_training>
    IQL (D4RL) <embodied/iql_d4rl>

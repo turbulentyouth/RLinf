@@ -1,0 +1,22 @@
+# Compute initial trajectory returns for a Bi-Flexiv expert record.
+# For an expert demonstration use type=sft, which treats the episode as
+# successful and assigns -1 per step with a terminal reward of 0.
+
+data:
+  data_root: null
+  train_data_paths:
+    - dataset_path: "/path/to/stack-cubes-flexiv"
+      type: "sft"
+  dataset_type: "sft"
+  gamma: 1.0
+  failure_reward: -300.0
+  tag: "success"
+  num_workers: 8
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
+

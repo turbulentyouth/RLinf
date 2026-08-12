@@ -31,6 +31,9 @@ from openpi.training.config import (
 from rlinf.models.embodiment.openpi.dataconfig.behavior_dataconfig import (
     LeRobotBehaviorDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.bi_flexiv_dataconfig import (
+    BiFlexivDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.calvin_dataconfig import (
     LeRobotCalvinDataConfig,
 )
@@ -75,6 +78,18 @@ from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import 
 )
 
 _CONFIGS = [
+    TrainConfig(
+        name="pi05_bi_flexiv",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=50, discrete_state_input=True
+        ),
+        data=BiFlexivDataConfig(
+            repo_id="bi_flexiv",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_bi_flexiv/assets"),
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
     TrainConfig(
         name="pi0_libero",
         model=pi0_config.Pi0Config(),

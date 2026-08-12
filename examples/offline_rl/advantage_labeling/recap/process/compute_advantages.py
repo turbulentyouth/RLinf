@@ -115,6 +115,13 @@ KEY_MAPPINGS = {
         "observation.state.gripper_pose": "observation/state/gripper_pose",
         "task": "prompt",
     },
+    "bi_flexiv": {
+        "observation.images.head": "observation/images/head",
+        "observation.images.left_wrist": "observation/images/left_wrist",
+        "observation.images.right_wrist": "observation/images/right_wrist",
+        "observation.state": "observation/state",
+        "task": "prompt",
+    },
     "libero": {
         "observation.image": "observation/image",
         "observation.wrist_image": "observation/wrist_image",
@@ -302,6 +309,17 @@ def load_lerobot_dataset(
                 task_idx = entry.get("task_index", len(tasks))
                 task_desc = entry.get("task", "")
                 tasks[task_idx] = task_desc
+    else:
+        # LeRobot v3 exports tasks as tasks.parquet by default.  Keep the
+        # jsonl path for older datasets, then fall back to the v3 metadata.
+        tasks_parquet = dataset_path / "meta" / "tasks.parquet"
+        if tasks_parquet.exists():
+            tasks_table = pd.read_parquet(tasks_parquet)
+            if "task_index" in tasks_table.columns and "task" in tasks_table.columns:
+                tasks = {
+                    int(row.task_index): str(row.task)
+                    for row in tasks_table.itertuples(index=False)
+                }
 
     logger.info(
         f"Loaded dataset: {len(dataset)} samples, {meta.total_episodes} episodes"
