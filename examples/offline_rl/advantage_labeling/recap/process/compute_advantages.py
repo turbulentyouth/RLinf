@@ -27,7 +27,6 @@ Usage:
 """
 
 import gc
-import json
 import logging
 import os
 
@@ -79,8 +78,13 @@ from rlinf.data.datasets.recap.utils import (
     decode_image_struct_batch,
     load_return_stats_from_dataset,
     load_returns_sidecar,
+    load_task_descriptions,
 )
-from rlinf.data.storage.lerobot import episode_boundaries  # noqa: E402
+from rlinf.data.storage.lerobot import (  # noqa: E402
+    episode_boundaries,
+    load_local_lerobot_dataset,
+    load_local_lerobot_metadata,
+)
 from rlinf.models.embodiment.value_model.recap.modeling_critic import ValueCriticModel
 
 logger = logging.getLogger(__name__)
@@ -262,7 +266,10 @@ def load_lerobot_dataset(
     Returns:
         Tuple of (dataset, tasks_dict, metadata, returns_sidecar)
     """
-    meta = LeRobotDatasetMetadata(str(dataset_path))
+    meta, dataset = load_local_lerobot_dataset(
+        dataset_path,
+        download_videos=False,
+    )
 
     logger.info(f"Dataset features: {list(meta.features.keys())}")
 
@@ -294,32 +301,9 @@ def load_lerobot_dataset(
     logger.info(f"  Dataset path: {dataset_path}")
     logger.info(f"  FPS: {meta.fps}")
 
-    dataset = LeRobotDataset(
-        str(dataset_path),
-        download_videos=False,
-    )
     dataset.hf_dataset.set_transform(decode_image_struct_batch)
 
-    tasks = {}
-    tasks_path = dataset_path / "meta" / "tasks.jsonl"
-    if tasks_path.exists():
-        with open(tasks_path, "r") as f:
-            for line in f:
-                entry = json.loads(line.strip())
-                task_idx = entry.get("task_index", len(tasks))
-                task_desc = entry.get("task", "")
-                tasks[task_idx] = task_desc
-    else:
-        # LeRobot v3 exports tasks as tasks.parquet by default.  Keep the
-        # jsonl path for older datasets, then fall back to the v3 metadata.
-        tasks_parquet = dataset_path / "meta" / "tasks.parquet"
-        if tasks_parquet.exists():
-            tasks_table = pd.read_parquet(tasks_parquet)
-            if "task_index" in tasks_table.columns and "task" in tasks_table.columns:
-                tasks = {
-                    int(row.task_index): str(row.task)
-                    for row in tasks_table.itertuples(index=False)
-                }
+    tasks = load_task_descriptions(dataset_path)
 
     logger.info(
         f"Loaded dataset: {len(dataset)} samples, {meta.total_episodes} episodes"
@@ -362,7 +346,7 @@ def build_obs(
                     raise ValueError(
                         f"task_index {task_idx} not found in tasks dict. "
                         f"Available task indices: {list(tasks.keys())}. "
-                        "Check that meta/tasks.jsonl is complete."
+                        "Check that meta/tasks.jsonl or meta/tasks.parquet is complete."
                     )
                 obs[dst_key] = tasks[task_idx]
             else:
@@ -1020,7 +1004,7 @@ def compute_advantages(cfg: DictConfig) -> None:
         max_samples = cfg.advantage.get("max_samples", None)
         grand_total = 0
         for ds_cfg in cfg.data.train_data_paths:
-            ds_meta = LeRobotDatasetMetadata(str(ds_cfg.dataset_path))
+            ds_meta = load_local_lerobot_metadata(ds_cfg.dataset_path)
             n = ds_meta.total_frames
             if max_samples is not None:
                 n = min(n, max_samples)

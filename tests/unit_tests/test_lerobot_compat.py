@@ -14,10 +14,20 @@
 
 """Unit tests for the LeRobot compatibility shims across lerobot versions."""
 
+import json
+import sys
+import types
+
 import pytest
 import torch
 
-from rlinf.data.storage.lerobot import add_frame_to_dataset, episode_boundaries
+from rlinf.data.storage import lerobot as lerobot_storage
+from rlinf.data.storage.lerobot import (
+    add_frame_to_dataset,
+    episode_boundaries,
+    is_lerobot_v3_dataset,
+    load_local_lerobot_dataset,
+)
 from rlinf.data.storage.lerobot.writer import LeRobotDatasetWriter
 
 
@@ -203,3 +213,62 @@ def test_episode_boundaries_rejects_v30_meta_without_the_columns():
 
     with pytest.raises(RuntimeError, match="Cannot determine episode boundaries"):
         episode_boundaries(_Partial())
+
+
+def _write_info(root, version):
+    meta = root / "meta"
+    meta.mkdir()
+    (meta / "info.json").write_text(json.dumps({"codebase_version": version}))
+
+
+def test_detects_lerobot_v3_from_info(tmp_path):
+    _write_info(tmp_path, "v3.0")
+
+    assert is_lerobot_v3_dataset(tmp_path)
+
+
+def test_v3_rejects_old_lerobot_before_hub_fallback(tmp_path, monkeypatch):
+    _write_info(tmp_path, "v3.0")
+    compat = sys.modules["rlinf.data.storage.lerobot.compat"]
+    monkeypatch.setattr(compat, "_lerobot_version_tuple", lambda: (0, 3, 3))
+
+    with pytest.raises(RuntimeError, match="looks for meta/tasks.jsonl"):
+        lerobot_storage.load_local_lerobot_metadata(tmp_path)
+
+
+def test_local_loader_passes_explicit_root(tmp_path, monkeypatch):
+    _write_info(tmp_path, "v3.0")
+    compat = sys.modules["rlinf.data.storage.lerobot.compat"]
+    monkeypatch.setattr(compat, "_lerobot_version_tuple", lambda: (0, 4, 4))
+    calls = {}
+
+    class Metadata:
+        def __init__(self, repo_id, root):
+            calls["metadata"] = (repo_id, root)
+
+    class Dataset:
+        def __init__(self, repo_id, **kwargs):
+            calls["dataset"] = (repo_id, kwargs)
+
+    package = types.ModuleType("lerobot")
+    datasets_package = types.ModuleType("lerobot.datasets")
+    dataset_module = types.ModuleType("lerobot.datasets.lerobot_dataset")
+    dataset_module.LeRobotDatasetMetadata = Metadata
+    dataset_module.LeRobotDataset = Dataset
+    monkeypatch.setitem(sys.modules, "lerobot", package)
+    monkeypatch.setitem(sys.modules, "lerobot.datasets", datasets_package)
+    monkeypatch.setitem(
+        sys.modules, "lerobot.datasets.lerobot_dataset", dataset_module
+    )
+
+    meta, dataset = load_local_lerobot_dataset(
+        tmp_path,
+        delta_timestamps={"action": [0.0]},
+    )
+
+    assert isinstance(meta, Metadata)
+    assert isinstance(dataset, Dataset)
+    assert calls["metadata"] == (tmp_path.name, tmp_path.resolve())
+    assert calls["dataset"][0] == tmp_path.name
+    assert calls["dataset"][1]["root"] == tmp_path.resolve()
+    assert calls["dataset"][1]["delta_timestamps"] == {"action": [0.0]}

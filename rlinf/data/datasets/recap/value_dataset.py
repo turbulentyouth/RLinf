@@ -27,20 +27,14 @@ import openpi.models.model as _openpi_model
 import openpi.transforms as _openpi_transforms
 import torch
 
-try:  # lerobot >= 0.2 layout
-    from lerobot.datasets.lerobot_dataset import (
-        LeRobotDataset,
-        LeRobotDatasetMetadata,
-    )
-except ModuleNotFoundError:  # lerobot < 0.2
-    from lerobot.common.datasets.lerobot_dataset import (
-        LeRobotDataset,
-        LeRobotDatasetMetadata,
-    )
 from openpi.transforms import DataTransformFn
 from torch.utils.data import Dataset
 
-from rlinf.data.storage.lerobot import episode_boundaries
+from rlinf.data.storage.lerobot import (
+    episode_boundaries,
+    load_local_lerobot_dataset,
+    load_local_lerobot_metadata,
+)
 from rlinf.models.embodiment.openpi.policies import franka_policy, libero_policy
 from rlinf.models.embodiment.openpi.policies import bi_flexiv_policy
 
@@ -246,7 +240,9 @@ class ValueDataset(Dataset):
         self.max_samples = max_samples
         local_path = Path(dataset_path).absolute()
 
-        self.dataset_meta = LeRobotDatasetMetadata(local_path.name, root=local_path)
+        # Use RLinf's local loader so v3 datasets never fall back to a bogus
+        # Hub repo after an old LeRobot release fails to find tasks.jsonl.
+        self.dataset_meta = load_local_lerobot_metadata(local_path)
         if "action" in self.dataset_meta.features:
             action_key = "action"
         elif "actions" in self.dataset_meta.features:
@@ -259,11 +255,11 @@ class ValueDataset(Dataset):
         delta_timestamps = {
             action_key: [t / self.dataset_meta.fps for t in range(action_horizon)]
         }
-        self._base = LeRobotDataset(
-            local_path.name,
-            root=local_path,
+        self.dataset_meta, self._base = load_local_lerobot_dataset(
+            local_path,
             delta_timestamps=delta_timestamps,
             download_videos=False,
+            metadata=self.dataset_meta,
         )
         self._base.hf_dataset.set_transform(decode_image_struct_batch)
 

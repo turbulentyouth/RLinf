@@ -35,6 +35,28 @@ Overview
 | **You'll do:** validate the record → compute returns → train the value VLM → compute advantages → train π₀.₅.
 | **Prerequisites:** OpenPI environment · SigLIP2 checkpoint · Gemma3 checkpoint · π₀.₅ PyTorch checkpoint.
 
+LeRobot Version
+---------------
+
+The Flexiv recorder emits the LeRobot v3 file-based format. If the OpenPI
+environment contains ``lerobot==0.3.3``, replace it once with the pinned v3
+reader before training:
+
+.. code:: bash
+
+   uv pip install --force-reinstall --no-deps \
+     "lerobot @ git+https://github.com/huggingface/lerobot.git@v0.4.4"
+
+Verify the active environment:
+
+.. code:: bash
+
+   python -c "from importlib.metadata import version; print(version('lerobot'))"
+
+The output must be ``0.4.4`` for LeRobot v3 records. RLinf now opens the local
+dataset with an explicit ``root`` and reports a direct version error instead of
+falling back to a nonexistent Hugging Face Hub repository.
+
 Prepare the Dataset
 -------------------
 
@@ -100,7 +122,7 @@ uses the VLM to write ``meta/advantages_recap.parquet``:
      advantage.value_checkpoint=$VALUE_CKPT \
      advantage.model.siglip_path=$SIGLIP_PATH \
      advantage.model.gemma3_path=$GEMMA_PATH \
-   advantage.model.tokenizer_path=$GEMMA_PATH
+     advantage.model.tokenizer_path=$GEMMA_PATH
 
 Step 4 optimizes π₀.₅ from the advantage labels:
 

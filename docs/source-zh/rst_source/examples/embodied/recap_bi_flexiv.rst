@@ -34,6 +34,27 @@ Bi-Flexiv Record 的离线 RECAP
 | **你将完成：** 验证 record → 计算 return → 训练 value VLM → 计算 advantage → 训练 π₀.₅。
 | **前置条件：** OpenPI 环境 · SigLIP2 checkpoint · Gemma3 checkpoint · π₀.₅ PyTorch checkpoint。
 
+LeRobot 版本
+------------
+
+Flexiv recorder 输出的是 LeRobot v3 file-based 格式。如果 OpenPI 环境中是
+``lerobot==0.3.3``，训练前需要执行一次定向覆盖，安装锁定的 v3 reader：
+
+.. code:: bash
+
+   uv pip install --force-reinstall --no-deps \
+     "lerobot @ git+https://github.com/huggingface/lerobot.git@v0.4.4"
+
+检查当前环境：
+
+.. code:: bash
+
+   python -c "from importlib.metadata import version; print(version('lerobot'))"
+
+LeRobot v3 record 应输出 ``0.4.4``。RLinf 现在会使用显式 ``root`` 打开本地
+数据集；版本不匹配时会直接报告版本错误，不再回退访问不存在的 Hugging Face
+Hub 仓库。
+
 准备数据集
 ----------
 

@@ -31,9 +31,19 @@ what removed ``LeRobotDataset.episode_data_index``.
 
 import functools
 import inspect
+import json
+import re
+from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any, Callable
 
-__all__ = ["add_frame_to_dataset", "episode_boundaries"]
+__all__ = [
+    "add_frame_to_dataset",
+    "episode_boundaries",
+    "is_lerobot_v3_dataset",
+    "load_local_lerobot_dataset",
+    "load_local_lerobot_metadata",
+]
 
 
 @functools.lru_cache(maxsize=None)
@@ -132,6 +142,81 @@ def episode_boundaries(dataset: Any) -> tuple[list[int], list[int]]:
         f"Got a {type(dataset).__name__} from lerobot "
         f"{_installed_lerobot_version()}."
     )
+
+
+def is_lerobot_v3_dataset(root: str | Path) -> bool:
+    """Return whether a local dataset uses the LeRobot v3 file layout.
+
+    The codebase version is authoritative. The ``tasks.parquet`` check keeps
+    the detector useful for early v3 exporters that omitted or misreported the
+    version string.
+    """
+    root = Path(root)
+    info_path = root / "meta" / "info.json"
+    if info_path.exists():
+        with open(info_path) as f:
+            version = str(json.load(f).get("codebase_version", ""))
+        if version.lower().startswith("v3"):
+            return True
+    return (root / "meta" / "tasks.parquet").exists()
+
+
+def _lerobot_version_tuple() -> tuple[int, ...]:
+    """Return the installed LeRobot release as a numeric tuple."""
+    try:
+        version = importlib_metadata.version("lerobot")
+    except importlib_metadata.PackageNotFoundError:
+        try:
+            import lerobot
+
+            version = getattr(lerobot, "__version__", "0")
+        except ImportError:
+            return (0,)
+    match = re.match(r"^(\d+(?:\.\d+)*)", str(version))
+    return tuple(int(part) for part in match.group(1).split(".")) if match else (0,)
+
+
+def _require_v3_capable_lerobot(root: Path) -> None:
+    """Fail before LeRobot performs a misleading Hugging Face Hub fallback."""
+    if is_lerobot_v3_dataset(root) and _lerobot_version_tuple() < (0, 4):
+        raise RuntimeError(
+            f"LeRobot v3 dataset detected at {root}, but the installed lerobot "
+            f"version is {_installed_lerobot_version()}. LeRobot 0.3.x only "
+            "understands v2.1 metadata and looks for meta/tasks.jsonl. Install "
+            "RLinf's pinned v3-compatible LeRobot with: "
+            "uv pip install --force-reinstall --no-deps 'lerobot @ "
+            "git+https://github.com/huggingface/lerobot.git@v0.4.4'."
+        )
+
+
+def load_local_lerobot_metadata(root: str | Path) -> Any:
+    """Load metadata from a local LeRobot dataset without Hub fallback."""
+    root = Path(root).expanduser().resolve()
+    _require_v3_capable_lerobot(root)
+    from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+    return LeRobotDatasetMetadata(root.name, root=root)
+
+
+def load_local_lerobot_dataset(
+    root: str | Path,
+    *,
+    delta_timestamps: dict[str, list[float]] | None = None,
+    download_videos: bool = False,
+    metadata: Any | None = None,
+) -> tuple[Any, Any]:
+    """Load a local LeRobot dataset and its metadata across v2.1/v3 releases."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    root = Path(root).expanduser().resolve()
+    meta = metadata if metadata is not None else load_local_lerobot_metadata(root)
+    dataset = LeRobotDataset(
+        root.name,
+        root=root,
+        delta_timestamps=delta_timestamps,
+        download_videos=download_videos,
+    )
+    return meta, dataset
 
 
 def _installed_lerobot_version() -> str:
