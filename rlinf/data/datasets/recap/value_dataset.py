@@ -41,7 +41,11 @@ from openpi.transforms import DataTransformFn
 from torch.utils.data import Dataset
 
 from rlinf.data.storage.lerobot import episode_boundaries
-from rlinf.models.embodiment.openpi.policies import franka_policy, libero_policy
+from rlinf.models.embodiment.openpi.policies import (
+    bi_flexiv_policy,
+    franka_policy,
+    libero_policy,
+)
 
 from .common import BaseDataLoaderImpl, ReCapMixtureDataset
 from .utils import (
@@ -84,6 +88,16 @@ _REPACK_KEYS = {
         "observation/wrist_image": "wrist_image",
         "observation/state": "state",
         "actions": "actions",
+        "prompt": "prompt",
+    },
+    "bi_flexiv": {
+        "images": {
+            "head": "observation.images.head",
+            "left_wrist": "observation.images.left_wrist",
+            "right_wrist": "observation.images.right_wrist",
+        },
+        "state": "observation.state",
+        "actions": "action",
         "prompt": "prompt",
     },
 }
@@ -331,6 +345,8 @@ class ValueDataset(Dataset):
                     model_type=model_type_enum,
                 )
             )
+        elif robot in ("bi_flexiv",):
+            transforms_list.append(bi_flexiv_policy.BiFlexivInputs())
 
         transforms_list.append(_openpi_transforms.InjectDefaultPrompt(default_prompt))
         transforms_list.append(_openpi_transforms.PadStatesAndActions(action_dim))

@@ -131,6 +131,13 @@ KEY_MAPPINGS = {
         "observation.gripper_position": "observation/gripper_position",
         "task": "prompt",
     },
+    "bi_flexiv": {
+        "observation.state": "observation/state",
+        "observation.images.head": "observation/images/head",
+        "observation.images.left_wrist": "observation/images/left_wrist",
+        "observation.images.right_wrist": "observation/images/right_wrist",
+        "task": "prompt",
+    },
 }
 
 
