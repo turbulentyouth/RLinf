@@ -1,0 +1,120 @@
+# Usage:
+#   bash examples/offline_rl/advantage_labeling/recap/run_value_sft.sh recap_bi_flexiv_value_model
+#
+# bi-Flexiv 双臂 value model SFT。
+# robot_type=bi_flexiv，state/action 20 维，三相机 head/left_wrist/right_wrist。
+
+defaults:
+  - model/recap_value_model@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:REPO_PATH}/examples/offline_rl/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: all
+
+runner:
+  # NOTE: task_type 只能取 SUPPORTED_TASK_TYPE (embodied/…/sft/offline)，没有
+  # "rollout"。value model 是监督训练 (SFTRunner + FSDPValueSftWorker)，必须用 sft。
+  # 数据集的 success/failure 语义由 compute_returns 写入 returns sidecar 决定，
+  # 与本字段无关。
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "bi_flexiv_value_sft"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 30000
+  max_steps: -1
+  val_check_interval: 500
+  save_interval: 3000
+
+data:
+  # 须与 Step 1 (compute_returns) 的 data.tag 一致；加载 meta/returns_{tag}.parquet
+  tag: null
+
+  train_data_paths:
+    - dataset_path: /path/to/Xense/stack-cubes-flexiv-0813
+      type: "rollout"
+      weight: 1.0
+      robot_type: "bi_flexiv"
+      model_type: "pi05"
+
+  eval_data_paths:
+    - dataset_path: /path/to/Xense/stack-cubes-flexiv-0813
+      max_samples: 10000
+      robot_type: "bi_flexiv"
+      model_type: "pi05"
+
+  train_num_workers: 8
+  eval_num_workers: 4
+  prefetch_factor: 4
+  persistent_workers: false
+  pin_memory: false
+  include_state: true
+  gamma: 1.0
+  action_horizon: 10
+  normalize_to_minus_one_zero: true
+  include_next_obs: false
+  action_dim: 20
+  robot_type: "bi_flexiv"
+  model_type: "pi05"
+  balance_weights: true
+  seed: 42
+
+algorithm:
+  adv_type: gae
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 32
+  global_batch_size: 256
+  seed: 0
+
+  model:
+    precision: bf16
+    siglip_path: "/path/to/siglip"
+    gemma3_path: "/path/to/gemma3"
+    tokenizer_path: "/path/to/gemma3"
+    freeze_vlm: false
+    action_dim: 20
+    action_horizon: 10
+
+  optim:
+    lr: 5.0e-5
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    weight_decay: 1e-10
+    clip_grad: 1.0
+    lr_scheduler: "constant"
+    lr_warmup_steps: 500
+    total_training_steps: 8000
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: False
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False

@@ -1,0 +1,29 @@
+# Usage:
+#   bash examples/offline_rl/advantage_labeling/recap/process/run_compute_returns.sh recap_bi_flexiv_returns
+#
+# 为 bi-Flexiv 双臂 (Rizon4) LeRobot 数据集计算 return/reward sidecar。
+# 数据集: Xense/stack-cubes-flexiv-0813
+#   - state/action 20 维 (left_tcp*9, right_tcp*9, left_gripper, right_gripper)
+#   - 三相机: observation.images.head / left_wrist / right_wrist
+#   - 含 observation.is_success 与 observation.is_intervention 字段
+
+data:
+  data_root: null
+  train_data_paths:
+    - dataset_path: /path/to/Xense/stack-cubes-flexiv-0813
+      # sft: 所有 episode 视为成功 (最后一步 reward=0)；
+      # rollout: 依据 observation.is_success 区分成功/失败 episode。
+      type: rollout
+
+  dataset_type: "rollout"
+  gamma: 1.0
+  failure_reward: -7500.0
+  tag: null
+  num_workers: 128
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

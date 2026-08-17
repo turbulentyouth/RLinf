@@ -157,6 +157,30 @@ def to_scalar(x):
     return x
 
 
+# LeRobot stores the per-frame intervention (human-takeover) flag either under
+# the ``observation.`` namespace (v3 layout, e.g. ``observation.is_intervention``)
+# or at the top level (``is_intervention``). Both are flat column names with a
+# literal dot in LeRobot, so we probe both. Frames without the field default to
+# ``False`` (not a takeover frame).
+_INTERVENTION_KEYS = ("observation.is_intervention", "is_intervention")
+
+
+def extract_is_intervention(sample: dict) -> bool:
+    """Read the per-frame intervention (human-takeover) flag from a sample.
+
+    Args:
+        sample: Single-timestep sample from a LeRobot dataset.
+
+    Returns:
+        ``True`` when this frame is a human-takeover (intervention) frame,
+        otherwise ``False``.
+    """
+    for key in _INTERVENTION_KEYS:
+        if key in sample and sample[key] is not None:
+            return bool(to_scalar(sample[key]))
+    return False
+
+
 class RunningStats:
     """Online statistics using Welford's algorithm (memory-efficient).
 
@@ -390,6 +414,10 @@ class ValueInferenceDataset(torch.utils.data.Dataset):
         sample = self.dataset[idx]
         ep_idx = int(to_scalar(sample["episode_index"]))
         frame_idx = int(to_scalar(sample["frame_index"]))
+        # Extracted from the *same* sample that provides episode_index/frame_index,
+        # so the intervention flag is matched by (episode_index, frame_index)
+        # rather than by any positional/row-number assumption.
+        is_intervention = extract_is_intervention(sample)
 
         obs = build_obs(sample, self.robot_type, self.tasks)
 
@@ -430,6 +458,7 @@ class ValueInferenceDataset(torch.utils.data.Dataset):
             "frame_index": frame_idx,
             "true_return": true_return,
             "reward": reward,
+            "is_intervention": is_intervention,
         }
 
 
@@ -453,6 +482,7 @@ def advantage_collate_fn(
             "frame_index": item["frame_index"],
             "true_return": item["true_return"],
             "reward": item["reward"],
+            "is_intervention": item["is_intervention"],
         }
         for item in batch
     ]
@@ -496,6 +526,9 @@ def compute_advantages_for_dataset(
     robot_type = dataset_cfg.get("robot_type", "libero")
     discount_next_value = cfg.advantage.get("discount_next_value", True)
     batch_size = cfg.advantage.get("batch_size", 64)
+    treat_intervention_as_positive = cfg.advantage.get(
+        "treat_intervention_as_positive", True
+    )
 
     ret_min = global_return_min
     ret_max = global_return_max
@@ -503,6 +536,10 @@ def compute_advantages_for_dataset(
     if rank == 0:
         logger.info(f"  Using global return_range: [{ret_min}, {ret_max}]")
         logger.info(f"  Using batch inference with batch_size: {batch_size}")
+        logger.info(
+            f"  Treat intervention (takeover) frames as positive: "
+            f"{treat_intervention_as_positive}"
+        )
 
     # Maps [ret_min, ret_max] -> [-1, 0]
     ret_range = ret_max - ret_min
@@ -569,6 +606,7 @@ def compute_advantages_for_dataset(
         "reward_sum": [],
         "reward_sum_raw": [],
         "num_valid_rewards": [],
+        "is_intervention": [],
     }
 
     v_curr_stats = RunningStats("V(o_t)")
@@ -657,6 +695,7 @@ def compute_advantages_for_dataset(
     meta_frame_idx = np.full(extended_size, -1, dtype=np.int64)
     meta_return = np.full(extended_size, np.nan, dtype=np.float64)
     meta_reward = np.full(extended_size, np.nan, dtype=np.float64)
+    meta_is_intervention = np.zeros(extended_size, dtype=bool)
     filled_mask = np.zeros(extended_size, dtype=bool)
 
     def process_value_batch(obs_list: list[dict], meta_list: list[dict]):
@@ -685,6 +724,9 @@ def compute_advantages_for_dataset(
             meta_frame_idx[local_idx] = int(meta_info["frame_index"])
             meta_return[local_idx] = float(meta_info["true_return"])
             meta_reward[local_idx] = float(meta_info["reward"])
+            meta_is_intervention[local_idx] = bool(
+                meta_info.get("is_intervention", False)
+            )
             filled_mask[local_idx] = True
 
     # Prefetch next batch while GPU processes current batch
@@ -826,6 +868,7 @@ def compute_advantages_for_dataset(
         results["reward_sum"].append(reward_sum)
         results["reward_sum_raw"].append(reward_sum_raw)
         results["num_valid_rewards"].append(num_valid)
+        results["is_intervention"].append(bool(meta_is_intervention[i]))
 
         if (i + 1) % flush_every_samples == 0:
             flush_results_to_disk()
@@ -879,6 +922,7 @@ def save_advantages_to_dataset(
     rank: int = 0,
     world_size: int = 1,
     tag: str | None = None,
+    treat_intervention_as_positive: bool = True,
 ):
     """Save advantages parquet directly into the source dataset's meta/ directory.
 
@@ -896,6 +940,9 @@ def save_advantages_to_dataset(
         rank: Current process rank
         world_size: Total number of processes
         tag: Optional tag for advantages parquet filename
+        treat_intervention_as_positive: Force human-takeover (intervention)
+            frames to a positive ``advantage`` label regardless of their
+            continuous advantage score.
     """
     if rank == 0:
         meta_dir = dataset_path / "meta"
@@ -910,6 +957,19 @@ def save_advantages_to_dataset(
             # Shared with STEAM (RECAP uses the inclusive `>=` convention).
             save_df["advantage"] = apply_boolean_label(
                 save_df["advantage_continuous"], threshold, inclusive=True
+            )
+
+        # Human-takeover (intervention) frames are treated as positive examples.
+        # The ``is_intervention`` flag is matched by (episode_index, frame_index):
+        # it is extracted from the exact sample that produced that row and travels
+        # with the row through the gather/sort, so no row-number assumption is made.
+        if treat_intervention_as_positive and "is_intervention" in save_df.columns:
+            intervention_mask = save_df["is_intervention"].fillna(False).astype(bool)
+            n_intervention = int(intervention_mask.sum())
+            save_df["advantage"] = save_df["advantage"].astype(bool) | intervention_mask
+            logger.info(
+                f"  Forced {n_intervention} intervention (takeover) frames to "
+                "positive advantage"
             )
 
         adv_filename = f"advantages_{tag}.parquet" if tag else "advantages.parquet"
@@ -1129,6 +1189,10 @@ def compute_advantages(cfg: DictConfig) -> None:
             "positive_quantile": positive_quantile,
         }
 
+        treat_intervention_as_positive = cfg.advantage.get(
+            "treat_intervention_as_positive", True
+        )
+
         for ds_path, result in dataset_results.items():
             df = result["df"]
             dataset_type = result["config"].get("type")
@@ -1140,6 +1204,7 @@ def compute_advantages(cfg: DictConfig) -> None:
                 rank=rank,
                 world_size=world_size,
                 tag=tag,
+                treat_intervention_as_positive=treat_intervention_as_positive,
             )
 
             if rank == 0:
