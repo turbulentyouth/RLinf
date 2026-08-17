@@ -31,6 +31,9 @@ from openpi.training.config import (
 from rlinf.models.embodiment.openpi.dataconfig.behavior_dataconfig import (
     LeRobotBehaviorDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.bi_flexiv_dataconfig import (
+    BiFlexivDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.calvin_dataconfig import (
     LeRobotCalvinDataConfig,
 )
@@ -547,6 +550,22 @@ _CONFIGS = [
             pi05=True, action_horizon=20, discrete_state_input=False
         ),
         data=DualFrankaTcpRot6dDataConfig(
+            repo_id="",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_base/assets"),
+            extra_delta_transform=True,
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
+    TrainConfig(
+        name="pi05_bi_flexiv",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            action_dim=20,
+            discrete_state_input=False,
+        ),
+        data=BiFlexivDataConfig(
             repo_id="",
             base_config=DataConfig(prompt_from_task=True),
             assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_base/assets"),

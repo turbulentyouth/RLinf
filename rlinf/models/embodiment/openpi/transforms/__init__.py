@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from rlinf.models.embodiment.openpi.transforms.rigid_body_delta import (
+    BI_FLEXIV_ROT6D_LAYOUT,
     DUAL_ARM_ROT6D_LAYOUT,
     RigidBodyAbsoluteActions,
     RigidBodyDeltaActions,
 )
 
 __all__ = [
+    "BI_FLEXIV_ROT6D_LAYOUT",
     "DUAL_ARM_ROT6D_LAYOUT",
     "RigidBodyAbsoluteActions",
     "RigidBodyDeltaActions",

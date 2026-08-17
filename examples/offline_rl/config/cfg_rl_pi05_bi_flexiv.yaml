@@ -64,11 +64,10 @@ actor:
     add_value_head: False
     action_dim: 20
     openpi:
-      # TODO(agent): bi_flexiv 的 openpi TrainConfig 尚未在
-      # rlinf/models/embodiment/openpi/dataconfig/__init__.py 注册。
-      # 这里暂以 pi05_libero 占位；需新增 pi05_bi_flexiv (三相机
-      # head/left_wrist/right_wrist, action_dim=20) 或改用合适的 dual-arm 配置。
-      config_name: "pi05_libero"
+      # pi05_bi_flexiv: 三相机 head/left_wrist/right_wrist, action_dim=20。
+      # 已在 rlinf/models/embodiment/openpi/dataconfig/__init__.py 注册；
+      # 数据集为绝对 TCP rot6d 动作，训练时经 RigidBodyDeltaActions 转为 SE(3) delta。
+      config_name: "pi05_bi_flexiv"
       cfgrl_guidance_scale: 1.0
       unconditional_prob: 0.1
       train_expert_only: False

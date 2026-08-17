@@ -38,6 +38,18 @@ DUAL_ARM_ROT6D_LAYOUT: tuple[dict[str, Any], ...] = (
     {"kind": "scalar_abs", "idx": 19},
 )
 
+# bi-Flexiv (Rizon4) 20-dim layout, matching ``Xense/stack-cubes-flexiv-0813``:
+#   [left_tcp.xyz(3), left_tcp.rot6d(6), right_tcp.xyz(3), right_tcp.rot6d(6),
+#    left_gripper(1), right_gripper(1)].
+# Unlike ``DUAL_ARM_ROT6D_LAYOUT``, the grippers sit at the END (indices 18/19)
+# rather than interleaved between the two arms.
+BI_FLEXIV_ROT6D_LAYOUT: tuple[dict[str, Any], ...] = (
+    {"kind": "pose6d", "xyz": slice(0, 3), "rot6d": slice(3, 9)},
+    {"kind": "pose6d", "xyz": slice(9, 12), "rot6d": slice(12, 18)},
+    {"kind": "scalar_abs", "idx": 18},
+    {"kind": "scalar_abs", "idx": 19},
+)
+
 
 def _validate_layout(layout: Sequence[dict[str, Any]]) -> None:
     for entry in layout:
