@@ -27,7 +27,6 @@ Usage:
 """
 
 import gc
-import json
 import logging
 import os
 
@@ -79,6 +78,7 @@ from rlinf.data.datasets.recap.utils import (
     decode_image_struct_batch,
     load_return_stats_from_dataset,
     load_returns_sidecar,
+    load_task_descriptions,
 )
 from rlinf.data.storage.lerobot import episode_boundaries  # noqa: E402
 from rlinf.models.embodiment.value_model.recap.modeling_critic import ValueCriticModel
@@ -293,15 +293,7 @@ def load_lerobot_dataset(
     )
     dataset.hf_dataset.set_transform(decode_image_struct_batch)
 
-    tasks = {}
-    tasks_path = dataset_path / "meta" / "tasks.jsonl"
-    if tasks_path.exists():
-        with open(tasks_path, "r") as f:
-            for line in f:
-                entry = json.loads(line.strip())
-                task_idx = entry.get("task_index", len(tasks))
-                task_desc = entry.get("task", "")
-                tasks[task_idx] = task_desc
+    tasks = load_task_descriptions(dataset_path)
 
     logger.info(
         f"Loaded dataset: {len(dataset)} samples, {meta.total_episodes} episodes"
@@ -344,7 +336,8 @@ def build_obs(
                     raise ValueError(
                         f"task_index {task_idx} not found in tasks dict. "
                         f"Available task indices: {list(tasks.keys())}. "
-                        "Check that meta/tasks.jsonl is complete."
+                        "Check that meta/tasks.jsonl (or meta/tasks.parquet) "
+                        "is complete."
                     )
                 obs[dst_key] = tasks[task_idx]
             else:

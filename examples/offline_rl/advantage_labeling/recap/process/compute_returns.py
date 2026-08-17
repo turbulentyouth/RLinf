@@ -45,10 +45,23 @@ from tqdm import tqdm
 # Make the rlinf package importable regardless of the cwd the user launched from.
 sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 
+from rlinf.data.datasets.recap.utils import load_task_descriptions
+
 logger = logging.getLogger(__name__)
 
-# Columns needed for computation (tiny — no images)
-_READ_COLUMNS = ["episode_index", "frame_index", "is_success", "task_index", "task"]
+# Columns needed for computation (tiny — no images).
+# ``is_success`` may be stored either at the top level (LeRobot v2 layout /
+# RLinf's own writer) or under the ``observation.`` namespace (some LeRobot v3
+# datasets use ``observation.is_success``). Both are flat column names with
+# literal dots in LeRobot, so they are read as plain columns here.
+_READ_COLUMNS = [
+    "episode_index",
+    "frame_index",
+    "is_success",
+    "observation.is_success",
+    "task_index",
+    "task",
+]
 
 
 def compute_returns_for_episode(
@@ -117,7 +130,8 @@ def _process_single_parquet(
 ) -> pa.Table | None:
     """Process a single parquet file: read only metadata columns, compute returns.
 
-    Only reads episode_index, frame_index, is_success, task_index — no images.
+    Only reads episode_index, frame_index, is_success (or observation.is_success),
+    task_index — no images.
 
     Returns:
         Arrow table with (episode_index, frame_index, return, reward, prompt)
@@ -148,11 +162,13 @@ def _process_single_parquet(
     is_success_col = None
     if "is_success" in col_names:
         is_success_col = table.column("is_success").to_pylist()
+    elif "observation.is_success" in col_names:
+        is_success_col = table.column("observation.is_success").to_pylist()
     elif dataset_type != "sft":
         raise ValueError(
-            f"Column 'is_success' not found in {pq_file}. "
-            f"Non-SFT datasets (dataset_type={dataset_type!r}) require 'is_success' "
-            "to correctly distinguish successful and failed episodes."
+            f"Column 'is_success' (or 'observation.is_success') not found in {pq_file}. "
+            f"Non-SFT datasets (dataset_type={dataset_type!r}) require a per-frame "
+            "success flag to correctly distinguish successful and failed episodes."
         )
 
     returns_arr = np.empty(n, dtype=np.float32)
@@ -243,15 +259,8 @@ def process_dataset(
     parquet_files = sorted(str(p) for p in data_dir.rglob("*.parquet"))
     logger.info(f"Found {len(parquet_files)} parquet files")
 
-    tasks: dict[int, str] = {}
-    tasks_path = output_path / "meta" / "tasks.jsonl"
-    if tasks_path.exists():
-        with open(tasks_path, "r") as f:
-            for line in f:
-                entry = json.loads(line.strip())
-                task_idx = entry.get("task_index", len(tasks))
-                task_desc = entry.get("task", "")
-                tasks[task_idx] = task_desc
+    # Loads meta/tasks.jsonl (LeRobot v2.x) or meta/tasks.parquet (v3.x).
+    tasks: dict[int, str] = load_task_descriptions(output_path)
 
     # PyArrow releases GIL during I/O, so threads achieve true parallelism
     result_tables: list[pa.Table] = []

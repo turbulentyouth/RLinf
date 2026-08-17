@@ -41,7 +41,6 @@ Usage:
 """
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +56,10 @@ from matplotlib.animation import FFMpegWriter, FuncAnimation
 from tqdm import tqdm
 
 from rlinf.algorithms.offline.process.mixture_config import read_mixture_config
-from rlinf.data.datasets.recap.utils import decode_image_struct_batch
+from rlinf.data.datasets.recap.utils import (
+    decode_image_struct_batch,
+    load_task_descriptions,
+)
 from rlinf.data.storage.lerobot import episode_boundaries
 
 
@@ -91,14 +93,8 @@ def load_dataset(
     )
     dataset.hf_dataset.set_transform(decode_image_struct_batch)
 
-    tasks = {}
-    tasks_path = dataset_path / "meta" / "tasks.jsonl"
-    if tasks_path.exists():
-        with open(tasks_path, "r") as f:
-            for line in f:
-                entry = json.loads(line.strip())
-                if "task_index" in entry and "task" in entry:
-                    tasks[entry["task_index"]] = entry["task"]
+    # Loads meta/tasks.jsonl (LeRobot v2.x) or meta/tasks.parquet (v3.x).
+    tasks = load_task_descriptions(dataset_path)
 
     return dataset, meta, tasks
 
