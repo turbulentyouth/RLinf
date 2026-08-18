@@ -119,7 +119,12 @@ def load_returns_sidecar(
 
 
 def load_task_descriptions(dataset_path: str | Path) -> dict[int, str]:
-    """Load task descriptions from ``meta/tasks.jsonl`` or ``meta/tasks.parquet``."""
+    """Load task descriptions from ``meta/tasks.jsonl`` or ``meta/tasks.parquet``.
+
+    LeRobot v3 datasets may store ``task`` as the pandas index of
+    ``meta/tasks.parquet`` instead of a regular column. Both layouts are
+    normalized to a ``task_index`` -> ``task`` mapping before returning.
+    """
     meta = Path(dataset_path) / "meta"
     jsonl = meta / "tasks.jsonl"
     if jsonl.exists():
@@ -136,6 +141,10 @@ def load_task_descriptions(dataset_path: str | Path) -> dict[int, str]:
         import pandas as pd
 
         df = pd.read_parquet(parquet)
+        if "task_index" not in df.columns and df.index.name == "task_index":
+            df = df.reset_index()
+        if "task" not in df.columns and df.index.name == "task":
+            df = df.reset_index()
         if "task_index" in df.columns and "task" in df.columns:
             return {int(r["task_index"]): str(r["task"]) for _, r in df.iterrows()}
 
