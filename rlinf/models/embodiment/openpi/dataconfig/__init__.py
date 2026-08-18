@@ -568,7 +568,10 @@ _CONFIGS = [
         data=BiFlexivDataConfig(
             repo_id="",
             base_config=DataConfig(prompt_from_task=True),
-            assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_base/assets"),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_base/assets",
+                asset_id="bi_flexiv",
+            ),
             extra_delta_transform=True,
         ),
         pytorch_weight_path="checkpoints/torch/pi05_base",
