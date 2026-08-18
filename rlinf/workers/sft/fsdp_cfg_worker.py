@@ -194,10 +194,39 @@ class FSDPCfgWorker(FSDPSftWorker):
             if episodes is not None:
                 self._fix_episode_data_index(base_dataset, episodes)
 
+            # if data_config.prompt_from_task:
+            #     base_dataset = openpi_data_loader.TransformedDataset(
+            #         base_dataset,
+            #         [transforms.PromptFromLeRobotTask(dataset_meta.tasks)],
+            #     )
             if data_config.prompt_from_task:
+                tasks = dataset_meta.tasks
+
+                # LeRobot v3 stores tasks as a pandas DataFrame:
+                # task text is commonly the index and task_index is a column.
+                if not isinstance(tasks, dict):
+                    if hasattr(tasks, "columns") and "task_index" in tasks.columns:
+                        if "task" in tasks.columns:
+                            tasks = {
+                                int(task_index): str(task)
+                                for task_index, task in zip(
+                                    tasks["task_index"],
+                                    tasks["task"],
+                                )
+                            }
+                        else:
+                            tasks = {
+                                int(row["task_index"]): str(task)
+                                for task, row in tasks.iterrows()
+                            }
+                    else:
+                        raise ValueError(
+                            f"Unsupported LeRobot task metadata format: {type(tasks)}"
+                        )
+
                 base_dataset = openpi_data_loader.TransformedDataset(
                     base_dataset,
-                    [transforms.PromptFromLeRobotTask(dataset_meta.tasks)],
+                    [transforms.PromptFromLeRobotTask(tasks)],
                 )
 
             # RepackTransform strips all keys except OpenPI required ones,
