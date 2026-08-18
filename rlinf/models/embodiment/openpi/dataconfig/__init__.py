@@ -562,7 +562,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=50,
-            action_dim=20,
+            action_dim=32,
             discrete_state_input=True,
         ),
         data=BiFlexivDataConfig(
