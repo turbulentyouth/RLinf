@@ -561,9 +561,9 @@ _CONFIGS = [
         name="pi05_bi_flexiv",
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_horizon=10,
+            action_horizon=50,
             action_dim=20,
-            discrete_state_input=False,
+            discrete_state_input=True,
         ),
         data=BiFlexivDataConfig(
             repo_id="",
