@@ -26,4 +26,4 @@ PKG-INFO
 .cache
 .tmp
 recap_data/
-recap_model/
+recap_models/
