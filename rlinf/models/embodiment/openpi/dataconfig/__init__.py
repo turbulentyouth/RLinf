@@ -570,7 +570,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             assets=AssetsConfig(
                 assets_dir="checkpoints/torch/pi05_base/assets",
-                asset_id="bi_flexiv",
+                asset_id="assets/bi_flexiv",
             ),
             extra_delta_transform=True,
         ),
