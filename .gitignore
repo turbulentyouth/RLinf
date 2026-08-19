@@ -22,3 +22,8 @@ rlinf/envs/maniskill/assets
 PKG-INFO
 *.egg-info/
 .claude/settings.json
+
+.cache
+.tmp
+recap_data/
+recap_model/
