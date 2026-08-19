@@ -397,6 +397,7 @@ class ValueDataset(Dataset):
             local_path.name,
             root=local_path,
             delta_timestamps=delta_timestamps,
+            tolerance_s=1e-3,
             download_videos=False,
         )
         self._base.hf_dataset.set_transform(decode_image_struct_batch)
