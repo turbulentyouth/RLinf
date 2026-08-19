@@ -34,10 +34,10 @@ runner:
     experiment_name: "bi_flexiv_value_sft"
     logger_backends: ["tensorboard"]
 
-  max_epochs: 30000
-  max_steps: -1
-  val_check_interval: 500
-  save_interval: 3000
+  max_epochs: -1
+  max_steps: 8000
+  val_check_interval: 250
+  save_interval: 500
 
 data:
   # 须与 Step 1 (compute_returns) 的 data.tag 一致；加载 meta/returns_{tag}.parquet
@@ -70,7 +70,7 @@ data:
   pin_memory: false
   include_state: true
   gamma: 1.0
-  action_horizon: 10
+  action_horizon: 50
   normalize_to_minus_one_zero: true
   include_next_obs: false
   action_dim: 20
