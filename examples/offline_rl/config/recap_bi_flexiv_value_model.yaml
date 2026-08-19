@@ -43,6 +43,14 @@ data:
   # 须与 Step 1 (compute_returns) 的 data.tag 一致；加载 meta/returns_{tag}.parquet
   tag: null
 
+  # 在同一个数据集内部按 terminal reward 分层切分 train/val episode。
+  # train_data_paths 与 eval_data_paths 可以指向同一个 dataset_path。
+  episode_split:
+    enabled: true
+    eval_ratio: 0.2
+    seed: 42
+    stratify_by_terminal_reward: true
+
   train_data_paths:
     - dataset_path: /path/to/Xense/stack-cubes-flexiv-0813
       type: "rollout"
@@ -52,7 +60,6 @@ data:
 
   eval_data_paths:
     - dataset_path: /path/to/Xense/stack-cubes-flexiv-0813
-      max_samples: 10000
       robot_type: "bi_flexiv"
       model_type: "pi05"
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -212,6 +213,120 @@ class ReturnNormalizer(DataTransformFn):
         return result
 
 
+def _terminal_reward_groups(
+    sidecar: dict[int, dict[str, np.ndarray]],
+) -> dict[float, list[int]]:
+    """Group episode IDs by their terminal reward.
+
+    Args:
+        sidecar: Per-episode return and reward arrays from a returns sidecar.
+
+    Returns:
+        A mapping from terminal reward to the sorted episode IDs in that stratum.
+
+    Raises:
+        ValueError: If an episode has no rewards or a non-finite terminal reward.
+    """
+    groups: dict[float, list[int]] = defaultdict(list)
+    for episode_index, episode_data in sidecar.items():
+        rewards = episode_data.get("reward")
+        if rewards is None or len(rewards) == 0:
+            raise ValueError(f"Episode {episode_index} has no rewards")
+
+        terminal_reward = float(rewards[-1])
+        if not np.isfinite(terminal_reward):
+            raise ValueError(
+                f"Episode {episode_index} has a non-finite terminal reward: "
+                f"{terminal_reward}"
+            )
+        groups[terminal_reward].append(int(episode_index))
+
+    return {label: sorted(episodes) for label, episodes in groups.items()}
+
+
+def _stratified_episode_split(
+    sidecar: dict[int, dict[str, np.ndarray]],
+    eval_ratio: float,
+    seed: int,
+) -> tuple[set[int], set[int]]:
+    """Create a deterministic train/eval split stratified by terminal reward.
+
+    The total eval size is rounded from ``eval_ratio`` and allocated across
+    terminal-reward strata with the largest-remainder method. Every stratum
+    keeps at least one episode in train.
+
+    Args:
+        sidecar: Per-episode return and reward arrays from a returns sidecar.
+        eval_ratio: Desired fraction of episodes assigned to eval.
+        seed: Seed for deterministic within-stratum episode shuffling.
+
+    Returns:
+        Train and eval episode-ID sets. The sets are disjoint and together
+        cover every episode in *sidecar*.
+
+    Raises:
+        ValueError: If the ratio or sidecar is invalid, or the requested eval
+            size cannot preserve at least one train episode in every stratum.
+    """
+    if not 0.0 < eval_ratio < 1.0:
+        raise ValueError(f"eval_ratio must be in (0, 1), got {eval_ratio}")
+
+    groups = _terminal_reward_groups(sidecar)
+    total = sum(len(episodes) for episodes in groups.values())
+    if total < 2:
+        raise ValueError("Need at least 2 episodes for train/eval split")
+
+    target_eval = max(1, min(int(round(total * eval_ratio)), total - 1))
+    eval_capacity = sum(max(len(episodes) - 1, 0) for episodes in groups.values())
+    if target_eval > eval_capacity:
+        raise ValueError(
+            "Unable to allocate requested eval episodes while keeping at "
+            "least one train episode per terminal-reward stratum "
+            f"(requested={target_eval}, capacity={eval_capacity})"
+        )
+
+    allocations: dict[float, int] = {}
+    remainders: list[tuple[float, int, float]] = []
+    for label, episodes in groups.items():
+        quota = target_eval * len(episodes) / total
+        quota_floor = int(np.floor(quota))
+        capacity = max(len(episodes) - 1, 0)
+        allocations[label] = min(quota_floor, capacity)
+        remainders.append((quota - quota_floor, len(episodes), label))
+
+    remaining = target_eval - sum(allocations.values())
+    for _, _, label in sorted(remainders, reverse=True):
+        if remaining <= 0:
+            break
+        if allocations[label] < len(groups[label]) - 1:
+            allocations[label] += 1
+            remaining -= 1
+
+    if remaining != 0:
+        raise ValueError(
+            "Unable to allocate requested eval episodes with largest-remainder "
+            "allocation"
+        )
+
+    rng = np.random.default_rng(seed)
+    train_episodes: set[int] = set()
+    eval_episodes: set[int] = set()
+    for label in sorted(groups):
+        episodes = np.asarray(groups[label], dtype=np.int64)
+        shuffled_episodes = rng.permutation(episodes)
+        n_eval = allocations[label]
+        eval_episodes.update(int(x) for x in shuffled_episodes[:n_eval])
+        train_episodes.update(int(x) for x in shuffled_episodes[n_eval:])
+
+    all_episodes = {int(episode_index) for episode_index in sidecar}
+    if not train_episodes.isdisjoint(eval_episodes):
+        raise ValueError("Stratified episode split produced overlapping episodes")
+    if train_episodes | eval_episodes != all_episodes:
+        raise ValueError("Stratified episode split did not cover all episodes")
+
+    return train_episodes, eval_episodes
+
+
 class ValueDataset(Dataset):
     """Flat dataset for value model SFT."""
 
@@ -228,6 +343,10 @@ class ValueDataset(Dataset):
         normalize_to_minus_one_zero: bool = True,
         max_samples: Optional[int] = None,
         tag: Optional[str] = None,
+        split: Optional[str] = None,
+        eval_ratio: float = 0.2,
+        split_seed: int = 42,
+        stratify_by_terminal_reward: bool = False,
         episode_percentage: Optional[float] = None,
         shuffle_episodes: bool = False,
         episode_seed: int = 42,
@@ -235,7 +354,6 @@ class ValueDataset(Dataset):
     ):
         _known_unused = {
             "gamma",
-            "split",
             "repo_id",
             "norm_stats_dir",
             "asset_id",
@@ -245,6 +363,19 @@ class ValueDataset(Dataset):
         unexpected = set(kwargs) - _known_unused
         if unexpected:
             logger.warning(f"ValueDataset ignoring unexpected kwargs: {unexpected}")
+
+        if split not in (None, "train", "val"):
+            raise ValueError(f"split must be 'train', 'val', or None, got {split}")
+        if stratify_by_terminal_reward:
+            if split is None:
+                raise ValueError(
+                    "stratify_by_terminal_reward requires split='train' or 'val'"
+                )
+            if episode_percentage is not None:
+                raise ValueError(
+                    "episode_percentage cannot be used together with automatic "
+                    "train/eval episode split"
+                )
 
         self.max_samples = max_samples
         local_path = Path(dataset_path).absolute()
@@ -278,7 +409,7 @@ class ValueDataset(Dataset):
                 f"meta/returns{'_' + tag if tag else ''}.parquet"
             )
 
-        self._indices = None
+        self._indices: list[int] | None = None
         if episode_percentage is not None and episode_percentage < 100:
             if episode_percentage <= 0:
                 raise ValueError(
@@ -296,6 +427,61 @@ class ValueDataset(Dataset):
             self._indices = [
                 i for ep in sorted(selected) for i in range(ep_starts[ep], ep_ends[ep])
             ]
+        elif stratify_by_terminal_reward:
+            ep_starts, ep_ends = episode_boundaries(self._base)
+            dataset_episodes = set(range(len(ep_starts)))
+            sidecar_episodes = set(self._sidecar)
+            if dataset_episodes != sidecar_episodes:
+                raise ValueError(
+                    "Automatic episode split requires the returns sidecar to "
+                    f"cover all dataset episodes. Dataset has {len(dataset_episodes)} "
+                    f"episodes, sidecar has {len(sidecar_episodes)}; missing="
+                    f"{sorted(dataset_episodes - sidecar_episodes)}, extra="
+                    f"{sorted(sidecar_episodes - dataset_episodes)}"
+                )
+
+            train_episodes, eval_episodes = _stratified_episode_split(
+                self._sidecar,
+                eval_ratio=eval_ratio,
+                seed=split_seed,
+            )
+            selected = train_episodes if split == "train" else eval_episodes
+            self._indices = [
+                i
+                for episode in sorted(selected)
+                for i in range(
+                    ep_starts[episode],
+                    ep_ends[episode],
+                )
+            ]
+
+            reward_groups = _terminal_reward_groups(self._sidecar)
+            logger.info(
+                "[ValueDataset] Stratified episode split: split=%s seed=%s "
+                "eval_ratio=%s total=%d train_episodes=%d eval_episodes=%d",
+                split,
+                split_seed,
+                eval_ratio,
+                len(train_episodes) + len(eval_episodes),
+                len(train_episodes),
+                len(eval_episodes),
+            )
+            for terminal_reward in sorted(reward_groups):
+                episodes = set(reward_groups[terminal_reward])
+                logger.info(
+                    "[ValueDataset] terminal_reward=%s: total=%d train=%d eval=%d",
+                    terminal_reward,
+                    len(episodes),
+                    len(episodes & train_episodes),
+                    len(episodes & eval_episodes),
+                )
+            logger.info(
+                "[ValueDataset] split=%s episodes=%d frames=%d episode_ids=%s",
+                split,
+                len(selected),
+                len(self._indices),
+                sorted(selected),
+            )
 
         self._transform = self._build_transform(
             robot_type=robot_type,
@@ -316,7 +502,7 @@ class ValueDataset(Dataset):
             else None
         )
 
-        n = len(self._indices) if self._indices else len(self._base)
+        n = len(self._indices) if self._indices is not None else len(self._base)
         logger.info(f"ValueDataset: {dataset_path}, {min(n, max_samples or n)} samples")
 
     @staticmethod
@@ -354,11 +540,11 @@ class ValueDataset(Dataset):
         return _openpi_transforms.compose(transforms_list)
 
     def __len__(self) -> int:
-        n = len(self._indices) if self._indices else len(self._base)
+        n = len(self._indices) if self._indices is not None else len(self._base)
         return min(n, self.max_samples) if self.max_samples else n
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        real_idx = self._indices[idx] if self._indices else idx
+        real_idx = self._indices[idx] if self._indices is not None else idx
         sample = self._base[real_idx]
 
         ep = int(sample.get("episode_index", -1))

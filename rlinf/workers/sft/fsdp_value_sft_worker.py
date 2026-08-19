@@ -160,6 +160,14 @@ class FSDPValueSftWorker(FSDPModelManager, Worker):
         eval_num_workers = int(data_cfg.get("eval_num_workers", train_num_workers))
         prefetch_factor = data_cfg.get("prefetch_factor", 2)
         persistent_workers = bool(data_cfg.get("persistent_workers", True))
+        episode_split_cfg = data_cfg.get("episode_split", {}) or {}
+        episode_split_enabled = bool(episode_split_cfg.get("enabled", False))
+        eval_ratio = float(episode_split_cfg.get("eval_ratio", 0.2))
+        split_seed = int(episode_split_cfg.get("seed", 42))
+        stratify_by_terminal_reward = bool(
+            episode_split_cfg.get("stratify_by_terminal_reward", True)
+        )
+        use_stratified_split = episode_split_enabled and stratify_by_terminal_reward
 
         def _loader_worker_kwargs(num_workers: int) -> dict:
             kwargs = {
@@ -325,6 +333,9 @@ class FSDPValueSftWorker(FSDPModelManager, Worker):
                 ),
                 "action_dim": entry.get("action_dim", shared["action_dim"]),
                 "split": "train",
+                "eval_ratio": eval_ratio,
+                "split_seed": split_seed,
+                "stratify_by_terminal_reward": use_stratified_split,
                 "default_prompt": entry.get("default_prompt", None),
                 "max_samples": entry.get("max_samples", None),
                 "episode_percentage": entry.get("episode_percentage", None),
@@ -418,6 +429,9 @@ class FSDPValueSftWorker(FSDPModelManager, Worker):
                     "normalize_to_minus_one_zero", shared["normalize_to_minus_one_zero"]
                 ),
                 split="val",
+                eval_ratio=eval_ratio,
+                split_seed=split_seed,
+                stratify_by_terminal_reward=use_stratified_split,
                 action_dim=eval_entry.get("action_dim", shared["action_dim"]),
                 default_prompt=eval_entry.get("default_prompt", None),
                 max_samples=eval_max_samples,
