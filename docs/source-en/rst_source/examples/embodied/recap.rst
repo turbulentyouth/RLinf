@@ -410,9 +410,14 @@ The training script automatically initializes the Ray cluster:
 
 **Key Metrics**
 
-- ``train/actor/loss``: Total value model training loss
-- ``train/actor/grad_norm``: Gradient norm
-- ``eval/spearman_correlation``: Spearman correlation coefficient measuring rank consistency between predictions and true returns
+- ``train/loss``: Total value model training loss
+- ``train/grad_norm``: Gradient norm
+- ``eval/value_spearman``: Spearman correlation coefficient measuring rank consistency between predictions and true returns
+
+The progress bar shows only a compact metric subset. At each
+``runner.val_check_interval``, the runner prints a full ``Global Step ... eval
+metrics`` line containing aggregate ``eval/...`` metrics and per-dataset
+``eval/{dataset}/...`` metrics; the same values are written to TensorBoard.
 
 .. note::
 

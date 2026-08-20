@@ -725,3 +725,50 @@ def print_metrics_table(
         os.makedirs(log_path, exist_ok=True)
         with open(os.path.join(log_path, "metrics.log"), "a") as metrics_file:
             metrics_file.write(table + "\n")
+
+
+_SFT_TRAIN_PROGRESS_KEYS = (
+    "time/training",
+    "train/loss",
+    "train/grad_norm",
+    "train/lr",
+)
+_SFT_EVAL_PROGRESS_KEYS = (
+    "time/evaluate",
+    "eval/loss",
+    "eval/mae",
+    "eval/cat_acc_best",
+    "eval/cat_acc_neighbor",
+    "eval/value_spearman",
+)
+
+
+def select_sft_progress_metrics(
+    metrics: dict[str, float],
+    *,
+    include_eval: bool,
+) -> dict[str, float]:
+    """Select a compact metric subset for an SFT progress-bar postfix.
+
+    Full evaluation results can contain aggregate and per-dataset copies of
+    every metric. Including all of them makes ``tqdm`` truncate the rendered
+    line at its fixed column limit.
+    """
+    keys = _SFT_TRAIN_PROGRESS_KEYS
+    if include_eval:
+        keys += _SFT_EVAL_PROGRESS_KEYS
+    return {key: metrics[key] for key in keys if key in metrics}
+
+
+def format_metric_pairs(metrics: dict[str, float]) -> str:
+    """Format metric pairs as a deterministic, human-readable string."""
+
+    def format_value(value: object) -> str:
+        try:
+            return f"{float(value):.6g}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    return ", ".join(
+        f"{key}={format_value(value)}" for key, value in sorted(metrics.items())
+    )

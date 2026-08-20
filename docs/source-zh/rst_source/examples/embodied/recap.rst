@@ -402,9 +402,14 @@ Step 2：训练价值模型（Value Model SFT）
 
 **关键监控指标**
 
-- ``train/actor/loss``：价值模型的总训练损失
-- ``train/actor/grad_norm``：梯度范数
-- ``eval/spearman_correlation``：Spearman 相关系数，衡量预测值与真实回报的排序一致性
+- ``train/loss``：价值模型的总训练损失
+- ``train/grad_norm``：梯度范数
+- ``eval/value_spearman``：Spearman 相关系数，衡量预测值与真实回报的排序一致性
+
+进度条只显示一组精简指标。每达到一次 ``runner.val_check_interval``，runner
+会输出完整的 ``Global Step ... eval metrics`` 行，其中包含聚合的
+``eval/...`` 指标和逐数据集的 ``eval/{dataset}/...`` 指标；相同数值也会写入
+TensorBoard。
 
 .. note::
 

@@ -22,6 +22,10 @@ from tqdm import tqdm
 from rlinf.scheduler import WorkerGroupFuncResult as Handle
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.metric_logger import MetricLogger
+from rlinf.utils.metric_utils import (
+    format_metric_pairs,
+    select_sft_progress_metrics,
+)
 from rlinf.utils.runner_utils import EarlyStopController, check_progress
 
 if TYPE_CHECKING:
@@ -141,8 +145,15 @@ class SFTRunner:
                 evaluate_metrics = {f"eval/{k}": v for k, v in eval_metrics[0].items()}
                 logging_metrics.update(evaluate_metrics)
                 self.metric_logger.log(evaluate_metrics, _step)
+                global_pbar.write(
+                    f"Global Step {self.global_step} eval metrics: "
+                    + format_metric_pairs(evaluate_metrics)
+                )
 
-            global_pbar.set_postfix(logging_metrics, refresh=False)
+            global_pbar.set_postfix(
+                select_sft_progress_metrics(logging_metrics, include_eval=eval_model),
+                refresh=False,
+            )
             global_pbar.update(1)
             if should_stop:
                 break

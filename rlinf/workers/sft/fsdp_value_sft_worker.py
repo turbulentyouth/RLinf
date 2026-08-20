@@ -69,6 +69,10 @@ class FSDPValueSftWorker(FSDPModelManager, Worker):
 
     def init_worker(self):
         self.setup_model_and_optimizer()
+        # Keep the one-time initialization outside ``run_training`` so this
+        # diagnostic is not emitted on every optimization step.
+        if hasattr(self.model, "gradient_checkpointing_disable"):
+            self.model.gradient_checkpointing_disable()
 
         if self.cfg.actor.get("enable_offload", False):
             self.offload_param_and_grad()
@@ -489,8 +493,6 @@ class FSDPValueSftWorker(FSDPModelManager, Worker):
                     self.load_optimizer(self.device)
 
             self.model.train()
-            if hasattr(self.model, "gradient_checkpointing_disable"):
-                self.model.gradient_checkpointing_disable()
 
             all_metrics = []
 
